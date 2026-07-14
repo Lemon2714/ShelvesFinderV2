@@ -138,33 +138,46 @@ def fetch_shelf_sync(
     url: str, product_id: str, brand: str, max_pages: int = MAX_SHELF_PAGES
 ) -> Optional[dict]:
     """
-    Fetch a Walmart browse shelf and check brand + product presence on it,
-    paging through the shelf to record *where* the product appears.
+    Fetch a Walmart browse shelf and derive the three visibility signals for a
+    product, fetching BOTH views of the shelf:
 
-    When a brand is supplied the page is fetched with the brand facet applied
-    (`?facet=brand:<Brand>`), letting us distinguish independent signals.
+      * Base browse URL          — the general "Walmart Digital Shelf".
+      * Brand-filtered URL        — `<url>?facet=brand:<brand>`, the
+                                    "Digital Shelf (Brand Filter)".
+
+    Signals (all page-1 presence — the single fetched page is treated as page 1;
+    no real pagination is used for them):
+
+      * visibility      — product present on the base/general shelf (raw
+                          presence; may be driven by sponsored placements).
+      * discoverability — product present on the brand-filtered shelf.
+                          When no brand is supplied the brand filter can't apply,
+                          so discoverability falls back to `visibility`.
+      * organic         — visibility AND discoverability (visible but not
+                          discoverable is treated as ad-driven, i.e. not organic).
 
     Returns:
-        {"brand": bool|None, "product": bool, "page": int}
-            brand   — True  : the brand facet returns results on this shelf
-                      False : the brand is not carried on this shelf
-                      None  : no brand supplied, so not evaluated
-            product — True/False : the product ID appears on the shelf
-            page    — 1-based paginated page the product was found on
-                      (0 when the product was not found)
+        {
+            "visibility": bool, "discoverability": bool, "organic": bool,
+            # Legacy fields kept for the v2 orchestrator / email report:
+            "brand":   bool|None,  # brand facet returns results on this shelf
+            "product": bool,       # product ID appears on the brand-filtered
+                                   # shelf (across paginated pages)
+            "page":    int,        # 1-based page the product was found on (0=none)
+        }
         None  — the category page itself does not exist ("page couldn't be found").
-                Callers must exclude None results from found/missing counts.
+                Callers must exclude None results from all counts.
     """
     brand_applied = bool(brand)
     try:
+        base_url = url.split("?")[0]
         if brand_applied:
             encoded_brand = urllib.parse.quote(brand)
-            base_url  = url.split("?")[0]
             shelf_url = f"{base_url}?facet=brand%3A{encoded_brand}"
         else:
             shelf_url = url
 
-        # --- Page 1 ---
+        # --- Page 1 of the shelf we filter on (brand-filtered, or base when no brand) ---
         first_html = _fetch_html(shelf_url)
 
         # --- Guard: skip pages that don't exist ---
@@ -176,12 +189,14 @@ def fetch_shelf_sync(
             logger.warning(f"[ShelfChecker] Page not found (skipping): {shelf_url}")
             return None   # signals "invalid" to the caller
 
-        found_page = 0
-        if product_id and str(product_id) in first_html:
-            found_page = 1
+        # Discoverability — product on page 1 of the brand-filtered shelf. The
+        # single fetched page is treated as page 1; we do not paginate for this.
+        page1_present = bool(product_id) and str(product_id) in first_html
+        discoverability = page1_present
 
-        # --- Page through the shelf until the product is found ---
-        # Stop early once a page returns no results (end of shelf).
+        # --- Legacy: page through the shelf to record *where* the product
+        # appears (feeds the v2 orchestrator's page-depth data). ---
+        found_page = 1 if page1_present else 0
         if not found_page and product_id and max_pages > 1 and not _is_empty_results(first_html):
             for page_num in range(2, max_pages + 1):
                 page_html = _fetch_html(_with_page(shelf_url, page_num))
@@ -193,6 +208,17 @@ def fetch_shelf_sync(
 
         product_present = found_page > 0
 
+        # Visibility — raw presence on the base/general shelf (page 1). When no
+        # brand is applied the shelf we already fetched *is* the base shelf.
+        if brand_applied:
+            base_html = _fetch_html(base_url)
+            visibility = bool(product_id) and str(product_id) in base_html
+        else:
+            visibility = page1_present
+            discoverability = visibility   # no brand filter → falls back to visibility
+
+        organic = visibility and discoverability
+
         if not brand_applied:
             brand_present = None
         elif product_present:
@@ -201,11 +227,21 @@ def fetch_shelf_sync(
         else:
             brand_present = not _is_empty_results(first_html)
 
-        return {"brand": brand_present, "product": product_present, "page": found_page}
+        return {
+            "visibility":      visibility,
+            "discoverability": discoverability,
+            "organic":         organic,
+            "brand":           brand_present,
+            "product":         product_present,
+            "page":            found_page,
+        }
 
     except Exception as e:
         logger.warning(f"[ShelfChecker] Unexpected error for {url}: {e}")
-        return {"brand": None, "product": False, "page": 0}
+        return {
+            "visibility": False, "discoverability": False, "organic": False,
+            "brand": None, "product": False, "page": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -219,18 +255,30 @@ async def check_shelf_visibility(pages: list, product_id: str, brand: str) -> di
     Invalid pages ("This page couldn't be found.") are excluded from all
     counts — they are neither found nor missing.
 
+    Each shelf is checked on TWO views (base + brand-filtered), yielding the
+    Visibility / Discoverability / Organic signals per shelf.
+
     Returns:
         {
-            "found":   int,   # shelves where product IS present
-            "missing": int,   # shelves where product is absent
+            # Discoverability-driven (feeds the shared Discoverability Dashboard):
+            "found":   int,   # shelves where the product is DISCOVERABLE
+            "missing": int,   # shelves where the product is NOT discoverable
             "invalid": int,   # pages that no longer exist (excluded from score)
-            "total":   int,   # found + missing  (invalid not counted)
-            "score":   float, # found / total * 100
-            "details": {url: {"brand": bool|None, "product": bool} | None, ...}
+            "total":   int,   # total keyword returns checked (invalid not counted)
+            "score":   float, # discoverable / total * 100
+            # Per-signal aggregate counts:
+            "visible":      int,  # shelves where the product is visible (base shelf)
+            "discoverable": int,  # == found
+            "organic":      int,  # shelves where the product is organically visible
+            "details": {url: {"visibility": bool, "discoverability": bool,
+                              "organic": bool, ...} | None, ...}
         }
     """
     if not pages or not product_id:
-        return {"found": 0, "missing": 0, "invalid": 0, "total": 0, "score": 0.0, "details": {}}
+        return {
+            "found": 0, "missing": 0, "invalid": 0, "total": 0, "score": 0.0,
+            "visible": 0, "discoverable": 0, "organic": 0, "details": {},
+        }
 
     sem = asyncio.Semaphore(3)
 
@@ -242,34 +290,45 @@ async def check_shelf_visibility(pages: list, product_id: str, brand: str) -> di
     tasks    = [process_page(item.get("url", "")) for item in pages if item.get("url")]
     outcomes = await asyncio.gather(*tasks)
 
-    details:       dict = {}
-    found_count:   int  = 0
-    invalid_count: int  = 0
+    details:           dict = {}
+    visible_count:     int  = 0
+    discoverable_count: int = 0
+    organic_count:     int  = 0
+    invalid_count:     int  = 0
 
     for url, result in outcomes:
         details[url] = result
         if result is None:
             invalid_count += 1
-        elif result.get("product"):
-            found_count += 1
-        # product False → missing, counted below
+            continue
+        if result.get("visibility"):
+            visible_count += 1
+        if result.get("discoverability"):
+            discoverable_count += 1
+        if result.get("organic"):
+            organic_count += 1
 
     valid_total   = len(outcomes) - invalid_count   # pages that actually exist
-    missing_count = valid_total - found_count
-    score         = (found_count / valid_total * 100) if valid_total > 0 else 0.0
+    found_count   = discoverable_count              # Discoverability-driven (Discoverability Dashboard)
+    missing_count = valid_total - discoverable_count
+    score         = (discoverable_count / valid_total * 100) if valid_total > 0 else 0.0
 
     logger.info(
-        f"[ShelfChecker] Results — found={found_count} missing={missing_count} "
-        f"invalid={invalid_count} total={valid_total} score={score:.1f}%"
+        f"[ShelfChecker] Results — visible={visible_count} discoverable={discoverable_count} "
+        f"organic={organic_count} missing={missing_count} invalid={invalid_count} "
+        f"total={valid_total} score={score:.1f}%"
     )
 
     return {
-        "found":   found_count,
-        "missing": missing_count,
-        "invalid": invalid_count,
-        "total":   valid_total,
-        "score":   round(score, 1),
-        "details": details,
+        "found":        found_count,
+        "missing":      missing_count,
+        "invalid":      invalid_count,
+        "total":        valid_total,
+        "score":        round(score, 1),
+        "visible":      visible_count,
+        "discoverable": discoverable_count,
+        "organic":      organic_count,
+        "details":      details,
     }
 
 

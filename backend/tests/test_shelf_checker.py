@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
-from app.tools.shelf_checker import _is_page_not_found, analyze_placement, fetch_shelf_sync
+from app.tools.shelf_checker import (
+    _is_page_not_found,
+    analyze_placement,
+    check_shelf_visibility,
+    fetch_shelf_sync,
+)
 from tests.conftest import HTIGEA_PRODUCT_ID
 
 
@@ -69,7 +74,8 @@ class TestIsPageNotFound:
 class TestFetchShelfSync:
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
-    def test_product_found_when_id_in_html(self, mock_get, mock_settings) -> None:
+    def test_visible_and_discoverable_is_organic(self, mock_get, mock_settings) -> None:
+        # Product ID present on both the base shelf and the brand-filtered shelf.
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
         mock_get.return_value.text = f"<html>items {HTIGEA_PRODUCT_ID} here</html>"
@@ -80,26 +86,57 @@ class TestFetchShelfSync:
             "Htigea",
         )
 
-        # Product present on page 1 → product True and brand inferred present
-        assert result == {"brand": True, "product": True, "page": 1}
-        call_url = mock_get.call_args[0][0]
-        assert "facet=brand%3A" in call_url or "facet=brand%3AHtigea" in call_url
+        # Visible on the base shelf AND discoverable on the brand shelf → organic.
+        assert result["visibility"] is True
+        assert result["discoverability"] is True
+        assert result["organic"] is True
+        # Legacy fields preserved for the v2 orchestrator / email report.
+        assert result["product"] is True
+        assert result["brand"] is True
+        assert result["page"] == 1
+        # The brand facet must be applied to the discoverability fetch.
+        fetched_urls = [c[0][0] for c in mock_get.call_args_list]
+        assert any("facet=brand%3A" in u for u in fetched_urls)
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
-    def test_product_missing_when_id_absent_no_brand(self, mock_get, mock_settings) -> None:
+    def test_missing_everywhere_no_brand(self, mock_get, mock_settings) -> None:
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
         mock_get.return_value.text = "<html>other products only</html>"
 
-        # No brand supplied → brand not evaluated (None)
+        # No brand supplied → brand filter can't apply; discoverability == visibility.
         result = fetch_shelf_sync(
             "https://www.walmart.com/browse/clothing/dresses/1",
             HTIGEA_PRODUCT_ID,
             "",
         )
 
-        assert result == {"brand": None, "product": False, "page": 0}
+        assert result["visibility"] is False
+        assert result["discoverability"] is False   # falls back to visibility
+        assert result["organic"] is False
+        assert result["brand"] is None
+        assert result["product"] is False
+        assert result["page"] == 0
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_no_brand_discoverability_equals_visibility(self, mock_get, mock_settings) -> None:
+        # Product present on the (base == brand-less) shelf: visibility True and
+        # discoverability must mirror it exactly when no brand is supplied.
+        mock_settings.webscraping_api_key = ""
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = f"<html>found {HTIGEA_PRODUCT_ID}</html>"
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "",
+        )
+
+        assert result["visibility"] is True
+        assert result["discoverability"] == result["visibility"]
+        assert result["organic"] is True
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
@@ -115,7 +152,12 @@ class TestFetchShelfSync:
             "Htigea",
         )
 
-        assert result == {"brand": True, "product": False, "page": 0}
+        assert result["visibility"] is False
+        assert result["discoverability"] is False
+        assert result["organic"] is False
+        assert result["brand"] is True
+        assert result["product"] is False
+        assert result["page"] == 0
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
@@ -131,7 +173,40 @@ class TestFetchShelfSync:
             "Htigea",
         )
 
-        assert result == {"brand": False, "product": False, "page": 0}
+        assert result["discoverability"] is False
+        assert result["organic"] is False
+        assert result["brand"] is False
+        assert result["product"] is False
+        assert result["page"] == 0
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_visible_ad_but_not_discoverable(self, mock_get, mock_settings) -> None:
+        from unittest.mock import MagicMock
+
+        # Base shelf carries the product (an ad placement), but the brand-filtered
+        # shelf does not → visible but not discoverable → NOT organic.
+        mock_settings.webscraping_api_key = ""
+
+        # Fetch order: brand page 1, (pagination pages 2..3), then the base shelf.
+        brand_page = MagicMock()
+        brand_page.raise_for_status.return_value = None
+        brand_page.text = "<html>Htigea brand dresses, other styles</html>"
+        base_page = MagicMock()
+        base_page.raise_for_status.return_value = None
+        base_page.text = f"<html>sponsored {HTIGEA_PRODUCT_ID} appears here</html>"
+        # brand p1, brand p2, brand p3, base
+        mock_get.side_effect = [brand_page, brand_page, brand_page, base_page]
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "Htigea",
+        )
+
+        assert result["visibility"] is True
+        assert result["discoverability"] is False
+        assert result["organic"] is False
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
@@ -146,7 +221,11 @@ class TestFetchShelfSync:
         page2 = MagicMock()
         page2.raise_for_status.return_value = None
         page2.text = f"<html>Htigea dresses including {HTIGEA_PRODUCT_ID}</html>"
-        mock_get.side_effect = [page1, page2]
+        base = MagicMock()
+        base.raise_for_status.return_value = None
+        base.text = f"<html>base shelf with {HTIGEA_PRODUCT_ID}</html>"
+        # brand p1 (miss), brand p2 (hit → stop), then the base-shelf fetch
+        mock_get.side_effect = [page1, page2, base]
 
         result = fetch_shelf_sync(
             "https://www.walmart.com/browse/clothing/dresses/1",
@@ -154,7 +233,12 @@ class TestFetchShelfSync:
             "Htigea",
         )
 
-        assert result == {"brand": True, "product": True, "page": 2}
+        # Legacy pagination still records page 2; discoverability is page-1 only.
+        assert result["product"] is True
+        assert result["page"] == 2
+        assert result["discoverability"] is False   # not on page 1 of brand shelf
+        assert result["visibility"] is True          # present on the base shelf
+        assert result["organic"] is False
         # Second request should target page 2
         second_url = mock_get.call_args_list[1][0][0]
         assert "page=2" in second_url
@@ -173,3 +257,60 @@ class TestFetchShelfSync:
         )
 
         assert result is None
+
+
+class TestCheckShelfVisibility:
+    """Aggregation of per-shelf signals, with the per-shelf fetch stubbed."""
+
+    async def test_empty_product_id_returns_all_zeros(self) -> None:
+        pages = [{"url": "https://www.walmart.com/browse/a/1"}]
+        stats = await check_shelf_visibility(pages, "", "Brand")
+        assert stats == {
+            "found": 0, "missing": 0, "invalid": 0, "total": 0, "score": 0.0,
+            "visible": 0, "discoverable": 0, "organic": 0, "details": {},
+        }
+
+    async def test_no_pages_returns_all_zeros(self) -> None:
+        stats = await check_shelf_visibility([], "123", "Brand")
+        assert stats["total"] == 0
+        assert stats["details"] == {}
+
+    async def test_aggregates_visible_discoverable_organic(self) -> None:
+        # Three valid shelves + one invalid (None) page.
+        canned = {
+            "https://www.walmart.com/browse/a/1": {
+                "visibility": True, "discoverability": True, "organic": True,
+                "brand": True, "product": True, "page": 1,
+            },
+            "https://www.walmart.com/browse/b/2": {
+                # Visible via ad, but not discoverable → not organic.
+                "visibility": True, "discoverability": False, "organic": False,
+                "brand": True, "product": False, "page": 0,
+            },
+            "https://www.walmart.com/browse/c/3": {
+                # Neither visible nor discoverable.
+                "visibility": False, "discoverability": False, "organic": False,
+                "brand": False, "product": False, "page": 0,
+            },
+            "https://www.walmart.com/browse/d/4": None,   # invalid page
+        }
+
+        def fake_fetch(url, product_id, brand, *a, **k):
+            return canned[url]
+
+        pages = [{"url": u} for u in canned]
+        with patch("app.tools.shelf_checker.fetch_shelf_sync", side_effect=fake_fetch):
+            stats = await check_shelf_visibility(pages, "123", "Brand")
+
+        assert stats["invalid"] == 1
+        assert stats["total"] == 3            # invalid excluded
+        assert stats["visible"] == 2
+        assert stats["discoverable"] == 1
+        assert stats["organic"] == 1
+        # found/missing/score are Discoverability-driven (Discoverability Dashboard).
+        assert stats["found"] == 1
+        assert stats["missing"] == 2
+        assert stats["score"] == round(1 / 3 * 100, 1)
+        # details carries the per-shelf signal dicts (and the None for invalid).
+        assert stats["details"]["https://www.walmart.com/browse/a/1"]["organic"] is True
+        assert stats["details"]["https://www.walmart.com/browse/d/4"] is None

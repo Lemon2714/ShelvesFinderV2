@@ -188,7 +188,7 @@ async def _call_evaluate(state: SessionState, args: dict) -> ToolResult:
 
 async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
     """Execute shelf visibility check on top unchecked pages."""
-    from app.tools.shelf_checker import check_shelf_visibility, fetch_search_placement_sync
+    from app.tools.shelf_checker import check_shelf_visibility
 
     max_pages: int = min(args.get("max_pages", 5), 5)
     # Pick top-ranked unchecked pages
@@ -204,27 +204,6 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
     logger.info(f"[Orchestrator] CHECK_SHELF: {len(candidates)} pages")
 
     raw_pages = [{"url": p.url, "keyword": p.keyword, "position": p.position} for p in candidates]
-
-    # --- Sponsored/organic placement: one search-results fetch per unique keyword ---
-    # Placement is a property of the keyword's search page, not the shelf, so we
-    # compute it once per keyword and cache it on the session across rounds.
-    async def _placement_for(keyword: str) -> dict:
-        if not keyword:
-            return {"organic": False, "sponsored": False}
-        if keyword in state.placement_cache:
-            return state.placement_cache[keyword]
-        try:
-            placement = await asyncio.to_thread(
-                fetch_search_placement_sync, keyword, state.product.product_id
-            )
-        except Exception as e:
-            logger.warning(f"[ShelfCheck] Placement fetch failed for '{keyword}': {e}")
-            placement = {"organic": False, "sponsored": False}
-        state.placement_cache[keyword] = placement
-        return placement
-
-    unique_keywords = {p.keyword for p in candidates if p.keyword}
-    await asyncio.gather(*(_placement_for(kw) for kw in unique_keywords))
 
     try:
         stats = await check_shelf_visibility(
@@ -253,19 +232,25 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
             found = bool(result.get("product"))
             brand_found = result.get("brand")
             page_found = result.get("page", 0) or 0
-            placement = state.placement_cache.get(page.keyword, {"organic": False, "sponsored": False})
+            visibility = bool(result.get("visibility"))
+            discoverability = bool(result.get("discoverability"))
+            organic = visibility and discoverability
+            sponsored = visibility and not discoverability
             logger.info(
                 f"[ShelfCheck] keyword='{page.keyword}' pos={page.position} "
                 f"brand={brand_found} found={found} page={page_found} "
-                f"sponsored={placement['sponsored']} organic={placement['organic']} url={page.url[:60]}"
+                f"visibility={visibility} discoverability={discoverability} "
+                f"sponsored={sponsored} organic={organic} url={page.url[:60]}"
             )
             sr = ShelfResult(
                 page_url=page.url,
                 product_found=found,
                 brand_found=brand_found,
                 page_number_found=page_found,
-                sponsored=bool(placement.get("sponsored")),
-                organic=bool(placement.get("organic")),
+                sponsored=sponsored,
+                organic=organic,
+                visibility=visibility,
+                discoverability=discoverability,
                 confidence=1.0 if found else 0.0,
                 checked_at_round=state.round_number,
                 keyword=page.keyword,

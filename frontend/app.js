@@ -169,9 +169,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!window.lastDiscoveredData || !window.lastDiscoveredData.length) return;
             let text = "Recommended Category Pages:\n\n";
             window.lastDiscoveredData.forEach(item => {
-                text += `${item.title}:\n${item.url}\n\n`;
+                text += `${item.title} — Walmart Digital Shelf:\n${item.url}\n\n`;
                 if (item.brandUrl && item.brandUrl !== item.url)
-                    text += `${item.title} (Brand Filter):\n${item.brandUrl}\n\n`;
+                    text += `${item.title} — Digital Shelf (Brand Filter):\n${item.brandUrl}\n\n`;
             });
             navigator.clipboard.writeText(text).then(() => {
                 const span = copyUrlsBtn.querySelector('span');
@@ -304,13 +304,13 @@ document.addEventListener('DOMContentLoaded', () => {
             'over ear headphones', 'gaming headset', 'workout earbuds',
         ],
         shelf_results: [
-            { url: 'https://www.walmart.com/browse/electronics/headphones/3944_96469', keyword: 'wireless headphones', position: 1, product_found: true, found: true, brand_found: true, sponsored: true, organic: true, page_number: 1 },
-            { url: 'https://www.walmart.com/browse/electronics/bluetooth-headphones/3944_96469_1231', keyword: 'bluetooth headphones', position: 2, product_found: true, found: true, brand_found: true, sponsored: false, organic: true, page_number: 1 },
-            { url: 'https://www.walmart.com/browse/electronics/over-ear-headphones/3944_96469_4561', keyword: 'over ear headphones', position: 3, product_found: true, found: true, brand_found: true, sponsored: true, organic: false, page_number: 2 },
-            { url: 'https://www.walmart.com/browse/electronics/gaming-headsets/3944_96469_7788', keyword: 'gaming headset', position: 4, product_found: false, found: false, brand_found: true, sponsored: false, organic: false, page_number: 0 },
-            { url: 'https://www.walmart.com/browse/electronics/noise-cancelling/3944_96469_9911', keyword: 'noise cancelling headphones', position: 5, product_found: false, found: false, brand_found: false, sponsored: false, organic: false, page_number: 0 },
+            { url: 'https://www.walmart.com/browse/electronics/headphones/3944_96469', keyword: 'wireless headphones', position: 1, product_found: true, found: true, brand_found: true, sponsored: false, organic: true, page_number: 1, visibility: true, discoverability: true },
+            { url: 'https://www.walmart.com/browse/electronics/bluetooth-headphones/3944_96469_1231', keyword: 'bluetooth headphones', position: 2, product_found: true, found: true, brand_found: true, sponsored: false, organic: true, page_number: 1, visibility: true, discoverability: true },
+            { url: 'https://www.walmart.com/browse/electronics/over-ear-headphones/3944_96469_4561', keyword: 'over ear headphones', position: 3, product_found: true, found: true, brand_found: true, sponsored: true, organic: false, page_number: 2, visibility: true, discoverability: false },
+            { url: 'https://www.walmart.com/browse/electronics/gaming-headsets/3944_96469_7788', keyword: 'gaming headset', position: 4, product_found: false, found: false, brand_found: true, sponsored: false, organic: false, page_number: 0, visibility: false, discoverability: true },
+            { url: 'https://www.walmart.com/browse/electronics/noise-cancelling/3944_96469_9911', keyword: 'noise cancelling headphones', position: 5, product_found: false, found: false, brand_found: false, sponsored: false, organic: false, page_number: 0, visibility: false, discoverability: false },
         ],
-        shelf_stats: { score: 60.0, found: 3, missing: 2, total: 5 },
+        shelf_stats: { score: 60.0, found: 3, missing: 2, total: 5, visible: 3, discoverable: 3 },
         openai_cost_usd: 0.0381,
     };
 
@@ -447,8 +447,8 @@ document.addEventListener('DOMContentLoaded', () => {
             { element: '#keywordContainer', ...pop('10. Extracted Search Intent', 'The keywords the AI inferred shoppers would use to find this product. Each links to a live Walmart search.') },
             { element: '#urlsContainer', ...pop('11. Recommended Category Pages', 'Every discovered shelf with its keyword & rank. The <b>Status</b> column shows <b>B</b> (brand carried on the shelf) and <b>P</b> (your product found there).') },
             { element: '#copyUrlsBtn', ...pop('Copy URLs', 'One click copies all recommended category page URLs to your clipboard.') },
-            { element: '#visibilityDashboardPanel', ...pop('12. Visibility Dashboard (Advance)', 'For shelves where your product IS found, this scores placement depth — page 1 (prime) vs buried on page 3+.') },
-            { element: '#visibilityTableSection', ...pop('13. Shelf Placement Detail', 'Per-shelf placement: whether your product shows as <b>Sponsor</b>, <b>Organic</b>, both, or is <b>Not found</b> in that keyword\'s search results.') },
+            { element: '#visibilityDashboardPanel', ...pop('12. Visibility Dashboard (Advance)', 'Across all keyword returns checked, this scores how many place your product <b>On the First Page</b> vs <b>Not on the First Page</b>.') },
+            { element: '#visibilityTableSection', ...pop('13. Shelf Placement Detail', 'Per-shelf placement based on visibility and discoverability: <b>Organic</b>, <b>Sponsor</b>, or <b>Not found</b>.') },
             { element: '#emailRecipients', ...pop('14. Email the report', 'Send the full report to one or more recipients (comma-separated) for sharing with your team.'), onHighlightStarted: () => { finalResultsPanel.scrollIntoView({ behavior: 'smooth', block: 'end' }); } },
             {
                 popover: {
@@ -829,6 +829,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 position: sr.position || 0,
                 found: sr.product_found ?? sr.found,
                 brand_found: sr.brand_found ?? null,
+                // Per-shelf signals so the table columns reflect the right dashboard.
+                visibility: sr.visibility ?? sr.found,
+                discoverability: sr.discoverability ?? sr.brand_found,
             })),
             confidence_score: (report.shelf_stats?.score || 0) / 100,
             openai_cost: report.openai_cost_usd || 0,
@@ -836,7 +839,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         renderFinalResults(normalised);
 
-        // Visibility dashboard — uses raw shelf_results for page depth data
+        // Visibility Dashboard — driven by the base-shelf Visibility signal.
         renderVisibilityDashboardPanel(report.shelf_results || []);
         renderVisibilityTable(report.shelf_results || [], report.product_brand || '');
     }
@@ -895,6 +898,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 </span>`;
     }
 
+    // Visibility shown as a page position on the base Walmart Digital Shelf.
+    function visibilityBadge(present) {
+        const on = present === true;
+        const icon = on ? 'check' : 'x';
+        const color = on ? 'var(--success)' : 'var(--error)';
+        const label = on ? 'Page 1' : 'Not on first page';
+        return `<span class="status-chip" title="Visibility (Ads) — position on the general Walmart Digital Shelf" style="align-items:flex-start;">
+                    <span class="status-chip-label">Visibility (Ads)</span>
+                    <span style="display:inline-flex;align-items:center;gap:0.25rem;font-size:0.75rem;font-weight:600;color:${color};">
+                        <i data-lucide="${icon}" style="width:14px;height:14px;"></i>${label}
+                    </span>
+                </span>`;
+    }
+
     function renderFinalResults(data) {
         window.lastRenderedData = data;
         finalResultsPanel.classList.remove('hidden');
@@ -946,8 +963,8 @@ document.addEventListener('DOMContentLoaded', () => {
             urlsContainer.innerHTML = '<p style="color:var(--text-secondary)">No category pages discovered.</p>';
         } else {
             const hdr = document.createElement('div');
-            hdr.style.cssText = 'display:flex;gap:1rem;margin-bottom:-0.25rem;font-weight:600;color:var(--text-secondary);font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em;';
-            hdr.innerHTML = `<div class="result-keyword-col" style="border:none;"><span>Keyword</span><span>Rank</span></div><div style="flex:1;min-width:0;">Recommended page</div><div style="flex:1;min-width:0;">Walmart brand page</div><div class="result-found-col">Status</div>`;
+            hdr.className = 'recommended-grid recommended-grid-header';
+            hdr.innerHTML = `<div class="recommended-keyword-header"><span>Keyword</span><span>Rank</span></div><div>Walmart Digital Shelf</div><div>Digital Shelf (Brand Filter)</div><div class="recommended-organic-header">Organic Visibility</div>`;
             urlsContainer.appendChild(hdr);
 
             data.browse_pages.forEach(item => {
@@ -961,34 +978,48 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 window.lastDiscoveredData.push({ title: categoryName, url, brandUrl, keyword, position: item?.position || null });
 
-                // Resolve brand + product signals.
-                // v2 rows carry booleans on the item; v1 reads shelf_stats.details (a {brand,product} object).
+                // Resolve the three visibility signals for this shelf.
+                //   Visibility (Ads) — product on the base/general shelf.
+                //   Discoverability  — product on the brand-filtered shelf (Page 1 / not).
+                //   Organic          — Visibility AND Discoverability.
+                // v1 reads shelf_stats.details[url] = {visibility, discoverability, organic};
+                // v2 rows carry booleans on the item, so we derive from those.
                 const detail = data.shelf_stats?.details?.[url];
-                let productFound, brandFound;
-                if (typeof item.found === 'boolean') {
-                    productFound = item.found;
-                    brandFound = (item.brand_found ?? null);
-                } else if (detail && typeof detail === 'object') {
-                    productFound = !!detail.product;
-                    brandFound = (detail.brand ?? null);
+                let visibility, discoverability, organic;
+                if (detail && typeof detail === 'object' && 'visibility' in detail) {
+                    // v1 payload: check_shelf_visibility details[url].
+                    visibility = !!detail.visibility;
+                    discoverability = !!detail.discoverability;
+                    organic = !!detail.organic;
+                } else if (typeof item.visibility === 'boolean') {
+                    // v2 payload: per-shelf signals mapped onto the item.
+                    visibility = item.visibility;
+                    discoverability = item.discoverability === true;
+                    organic = visibility && discoverability;
+                } else if (typeof item.found === 'boolean') {
+                    // Fallback (legacy/tour rows): approximate from found/brand_found.
+                    visibility = item.found;
+                    discoverability = (item.brand_found ?? item.found) === true;
+                    organic = visibility && discoverability;
                 } else {
-                    productFound = !!detail;
-                    brandFound = null;
+                    visibility = !!detail;
+                    discoverability = !!detail;
+                    organic = visibility && discoverability;
                 }
 
-                const statusHtml = `
-                    <div class="status-pair">
-                        ${statusChip('B', brandFound, 'Brand available in brand filter')}
-                        ${statusChip('P', productFound, 'Product found on the brand-filtered page')}
-                    </div>`;
+                const visHtml = visibilityBadge(visibility);
+                const discoverabilityHtml = statusChip('Discoverability', discoverability, 'Discoverability — product present on the brand-filtered Digital Shelf');
+                const organicHtml = `<div class="status-pair">${statusChip('Organic', organic, 'Organic Visibility — visible AND discoverable (not ad-driven)')}</div>`;
 
                 const row = document.createElement('div');
-                row.style.cssText = 'display:flex;gap:1rem;margin-bottom:0.5rem;flex-wrap:wrap;';
+                row.className = 'recommended-grid recommended-grid-row';
                 row.innerHTML = `
-                    <div class="result-keyword-col"><span class="keyword-badge">${keyword}</span>${posText}</div>
-                    <a href="${url}" target="_blank" class="url-card" style="flex:1;margin-bottom:0;min-width:0;"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
-                    <a href="${brandUrl}" target="_blank" class="url-card" style="flex:1;margin-bottom:0;min-width:0;"><div class="url-info"><span class="url-title">${categoryName} (Brand Filter)</span></div><i data-lucide="external-link"></i></a>
-                    <div class="result-found-col">${statusHtml}</div>`;
+                    <div class="result-keyword-col recommended-keyword-cell"><span class="keyword-badge">${keyword}</span>${posText}</div>
+                    <a href="${url}" target="_blank" class="url-card recommended-base-link"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
+                    <div class="recommended-status recommended-base-status">${visHtml}</div>
+                    <a href="${brandUrl}" target="_blank" class="url-card recommended-brand-link"><div class="url-info"><span class="url-title">${categoryName} (Brand Filter)</span></div><i data-lucide="external-link"></i></a>
+                    <div class="recommended-status recommended-brand-status">${discoverabilityHtml}</div>
+                    <div class="result-found-col recommended-organic-cell">${organicHtml}</div>`;
                 urlsContainer.appendChild(row);
             });
             lucide.createIcons({ root: urlsContainer });
@@ -1043,63 +1074,50 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // -----------------------------------------------------------------------
-    // Visibility Dashboard (v2 only)
-    // Measures placement quality — which page of results the product appears on
+    // Visibility Dashboard (v2 only) — corresponds to the "Walmart Digital Shelf".
+    // Binary: On First Page vs Not on First Page, driven by the base-shelf
+    // Visibility signal over all keyword returns checked.
     // -----------------------------------------------------------------------
     function renderVisibilityDashboardPanel(shelfResults) {
         const panel = document.getElementById('visibilityDashboardPanel');
         if (!panel) return;
 
-        const found = (shelfResults || []).filter(s => s.found === true);
-        const foundCount = found.length;
+        const all = shelfResults || [];
+        const total = all.length;   // total keyword returns checked (denominator)
 
-        if (foundCount === 0) {
+        if (total === 0) {
             panel.classList.add('hidden');
             return;
         }
         panel.classList.remove('hidden');
 
-        // Page depth buckets
-        const p1    = found.filter(s => (s.page_number || 1) === 1).length;
-        const p2    = found.filter(s => (s.page_number || 1) === 2).length;
-        const p3    = found.filter(s => (s.page_number || 1) >= 3).length;
+        // Visibility is a page-1 base-shelf signal (no pagination), so a visible
+        // product is "On First Page" and everything else is "Not on First Page".
+        const isVisible = (s) => (s.visibility !== undefined ? s.visibility : s.found) === true;
+        const onFirst  = all.filter(isVisible).length;
+        const notFirst = total - onFirst;
 
-        const p1Pct = ((p1 / foundCount) * 100).toFixed(1);
-        const p2Pct = ((p2 / foundCount) * 100).toFixed(1);
-        const p3Pct = ((p3 / foundCount) * 100).toFixed(1);
-
-        const avgPage = (found.reduce((sum, s) => sum + (s.page_number || 1), 0) / foundCount).toFixed(1);
-
-        // Visibility score — weighted by page depth (relative to found shelves only)
-        // Page 1 = 100 pts, Page 2 = 60 pts, Page 3+ = 25 pts
-        const weightedSum = found.reduce((sum, s) => {
-            const pg = s.page_number || 1;
-            return sum + (pg === 1 ? 1.0 : pg === 2 ? 0.6 : 0.25);
-        }, 0);
-        const visScore = (weightedSum / foundCount) * 100;
+        const onPct  = ((onFirst  / total) * 100).toFixed(1);
+        const notPct = ((notFirst / total) * 100).toFixed(1);
+        const visScore = (onFirst / total) * 100;
 
         // --- Bars ---
-        document.getElementById('visBarP1Pct').textContent  = `${p1Pct}%`;
-        document.getElementById('visFillP1').style.width    = `${p1Pct}%`;
-        document.getElementById('visTextP1').textContent    = `${p1} shelf${p1 !== 1 ? 'es' : ''}`;
+        document.getElementById('visBarP1Pct').textContent = `${onPct}%`;
+        document.getElementById('visFillP1').style.width    = `${onPct}%`;
+        document.getElementById('visTextP1').textContent    = `${onFirst} / ${total}`;
 
-        document.getElementById('visBarP2Pct').textContent  = `${p2Pct}%`;
-        document.getElementById('visFillP2').style.width    = `${p2Pct}%`;
-        document.getElementById('visTextP2').textContent    = `${p2} shelf${p2 !== 1 ? 'es' : ''}`;
-
-        document.getElementById('visBarP3Pct').textContent  = `${p3Pct}%`;
-        document.getElementById('visFillP3').style.width    = `${p3Pct}%`;
-        document.getElementById('visTextP3').textContent    = `${p3} shelf${p3 !== 1 ? 'es' : ''}`;
+        document.getElementById('visBarP2Pct').textContent = `${notPct}%`;
+        document.getElementById('visFillP2').style.width    = `${notPct}%`;
+        document.getElementById('visTextP2').textContent    = `${notFirst} / ${total}`;
 
         // --- Stat boxes ---
-        document.getElementById('visStatP1').textContent  = p1;
-        document.getElementById('visStatP2').textContent  = p2;
-        document.getElementById('visStatP3').textContent  = p3;
-        document.getElementById('visStatAvg').textContent = avgPage;
+        document.getElementById('visStatP1').textContent = onFirst;
+        document.getElementById('visStatP2').textContent = notFirst;
+        document.getElementById('visStatP3').textContent = total;
 
         // --- Score bar ---
-        document.getElementById('visScoreHuge').textContent   = `${visScore.toFixed(1)}%`;
-        document.getElementById('visScoreBar').style.width    = `${Math.min(visScore, 100)}%`;
+        document.getElementById('visScoreHuge').textContent = `${visScore.toFixed(1)}%`;
+        document.getElementById('visScoreBar').style.width  = `${Math.min(visScore, 100)}%`;
 
         // --- Risk level + placement quality ---
         const pill   = document.getElementById('visStatusPill');
@@ -1112,36 +1130,37 @@ document.addEventListener('DOMContentLoaded', () => {
             pill.textContent  = 'PRIME';    pill.className  = 'dash-pill healthy';
             rLevel.textContent = 'PRIME PLACEMENT';  rLevel.style.color = '#10b981';
             qHuge.textContent = 'EXCELLENT'; qHuge.className = 'dash-risk-huge healthy';
-            qDesc.textContent = `${p1} of ${foundCount} found shelves on page 1`;
-            banner.textContent = `Excellent visibility! ${p1} out of ${foundCount} found shelves place your product on page 1 — maximum shopper exposure.`;
+            qDesc.textContent = `${onFirst} of ${total} keyword returns on the first page`;
+            banner.textContent = `Excellent visibility! ${onFirst} of ${total} keyword returns place your product on the first page — maximum shopper exposure.`;
         } else if (visScore >= 50) {
             pill.textContent  = 'MODERATE'; pill.className  = 'dash-pill moderate';
-            rLevel.textContent = 'MODERATE DEPTH';   rLevel.style.color = '#f59e0b';
+            rLevel.textContent = 'MODERATE VISIBILITY';   rLevel.style.color = '#f59e0b';
             qHuge.textContent = 'MODERATE'; qHuge.className = 'dash-risk-huge moderate';
-            qDesc.textContent = `Average placement at page ${avgPage}`;
-            banner.textContent = `Moderate visibility. ${p1} shelf${p1 !== 1 ? 'es' : ''} on page 1, ${p2} on page 2, ${p3} on page 3+. Improving page-1 rankings will significantly boost shopper reach.`;
+            qDesc.textContent = `${onFirst} of ${total} keyword returns on the first page`;
+            banner.textContent = `Moderate visibility. ${onFirst} on the first page, ${notFirst} not on the first page. Improving first-page presence will boost shopper reach.`;
         } else {
-            pill.textContent  = 'BURIED';   pill.className  = 'dash-pill critical';
-            rLevel.textContent = 'DEEP PLACEMENT';   rLevel.style.color = '#ef4444';
+            pill.textContent  = 'LOW';   pill.className  = 'dash-pill critical';
+            rLevel.textContent = 'LOW VISIBILITY';   rLevel.style.color = '#ef4444';
             qHuge.textContent = 'BURIED';   qHuge.className = 'dash-risk-huge miss';
-            qDesc.textContent = `Product buried at avg page ${avgPage}`;
-            banner.textContent = `Low visibility. Your product appears at an average of page ${avgPage} across found shelves — most shoppers will not scroll this deep. Prioritise page-1 optimisation.`;
+            qDesc.textContent = `Only ${onFirst} of ${total} keyword returns on the first page`;
+            banner.textContent = `Low visibility. Your product is on the first page for only ${onFirst} of ${total} keyword returns — most shoppers will not find it. Prioritise first-page presence.`;
         }
 
         if (window.lucide) lucide.createIcons();
     }
 
     // -----------------------------------------------------------------------
-    // Visibility table (v2 only) — per-shelf placement depth for found shelves
+    // Visibility table (v2 only) — per-shelf placement classification
     // -----------------------------------------------------------------------
-    // Maps sponsored/organic flags to a Placement label + style class.
+    // Placement is derived exclusively from the shelf visibility signals.
+    // Organic = visible + discoverable; Sponsor = visible + not discoverable;
+    // all remaining combinations are Not found.
     function placementInfo(s) {
-        const sponsored = s.sponsored === true;
-        const organic = s.organic === true;
-        if (sponsored && organic) return { label: 'Sponsor & Organic', cls: 'both',     rank: 0 };
-        if (sponsored)            return { label: 'Sponsor',           cls: 'sponsor',  rank: 1 };
-        if (organic)              return { label: 'Organic',           cls: 'organic',  rank: 2 };
-        return { label: 'Not found', cls: 'notfound', rank: 3 };
+        const visibility = s.visibility === true;
+        const discoverability = s.discoverability === true;
+        if (visibility && discoverability)  return { label: 'Organic', cls: 'organic', rank: 0 };
+        if (visibility && !discoverability) return { label: 'Sponsor', cls: 'sponsor', rank: 1 };
+        return { label: 'Not found', cls: 'notfound', rank: 2 };
     }
 
     function renderVisibilityTable(shelfResults, brand) {
@@ -1158,7 +1177,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         section.classList.remove('hidden');
 
-        // Sponsor & Organic first, Not found last
+        // Organic first, Sponsor second, Not found last.
         const rows = all.slice().sort((a, b) => placementInfo(a).rank - placementInfo(b).rank);
 
         const hdr = document.createElement('div');

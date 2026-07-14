@@ -73,8 +73,10 @@ class ShelfResult:
     keyword: str = ""                # search keyword that discovered this page
     position: int = 0                # rank position in search results
     brand_found: Optional[bool] = None  # True/False if brand carried on shelf; None if not evaluated
-    sponsored: bool = False          # product appears as a sponsored listing in the keyword's search results
-    organic: bool = False            # product appears as an organic listing in the keyword's search results
+    sponsored: bool = False          # visible on base shelf but not discoverable on brand-filtered shelf
+    organic: bool = False            # visible on base shelf and discoverable on brand-filtered shelf
+    visibility: bool = False         # product present on the base/general shelf ("Walmart Digital Shelf")
+    discoverability: bool = False    # product present on the brand-filtered shelf ("Digital Shelf (Brand Filter)")
 
 
 @dataclass
@@ -237,6 +239,8 @@ class SessionState:
                 "brand_found": sr.brand_found,
                 "sponsored": sr.sponsored,
                 "organic": sr.organic,
+                "visibility": sr.visibility,           # base shelf → Visibility Dashboard
+                "discoverability": sr.discoverability,  # brand shelf → Discoverability Dashboard
                 "page_number": sr.page_number_found,
                 "confidence": sr.confidence,
                 "keyword": sr.keyword,
@@ -249,11 +253,20 @@ class SessionState:
                 "brand_found": sr.brand_found,
                 "sponsored": sr.sponsored,
                 "organic": sr.organic,
+                "visibility": sr.visibility,
+                "discoverability": sr.discoverability,
                 "page_number": 0,
                 "confidence": sr.confidence,
                 "keyword": sr.keyword,
                 "position": sr.position,
             })
+
+        # Dashboard aggregates. The shared Discoverability Dashboard is driven by
+        # Discoverability; visible/discoverable counts expose both signals.
+        all_results = self.found_pages + self.missing_pages
+        total_checked = len(all_results)
+        visible_count = sum(1 for sr in all_results if sr.visibility)
+        discoverable_count = sum(1 for sr in all_results if sr.discoverability)
 
         return {
             "session_id": self.session_id,
@@ -267,15 +280,14 @@ class SessionState:
             "stop_reason": self.stop_reason,
             "shelf_results": all_pages,
             "shelf_stats": {
-                "total": len(self.found_pages) + len(self.missing_pages),
-                "found": len(self.found_pages),
-                "missing": len(self.missing_pages),
+                "total": total_checked,
+                "found": discoverable_count,           # Discoverability-driven
+                "missing": total_checked - discoverable_count,
                 "score": round(
-                    len(self.found_pages)
-                    / max(len(self.found_pages) + len(self.missing_pages), 1)
-                    * 100,
-                    1,
+                    discoverable_count / max(total_checked, 1) * 100, 1
                 ),
+                "visible": visible_count,
+                "discoverable": discoverable_count,
                 "details": {
                     sr.page_url: True for sr in self.found_pages
                 },

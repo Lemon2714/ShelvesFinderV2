@@ -89,8 +89,8 @@ async def stream_plan(url: str, llm_provider: str = ""):
     # --- PHASE 5: SHELF CHECK ---
     yield {"step": "visibility", "status": "running", "message": f"Checking visibility of '{product_info.get('id')}' on {len(top_results)} shelves..."}
     shelf_stats = await check_shelf_visibility(top_results, product_info.get("id"), product_info.get("brand"))
-    yield {"step": "visibility", "status": "complete", "message": f"Shelf check complete. Found on {shelf_stats.get('found', 0)} shelves."}
-    logger.info(f"[Visibility Agent] Scan complete. Found {shelf_stats.get('found', 0)} / {shelf_stats.get('total', 0)} shelves. Score: {shelf_stats.get('score', 0.0)}%")
+    yield {"step": "visibility", "status": "complete", "message": f"Visible on {shelf_stats.get('visible', 0)} of {shelf_stats.get('total', 0)} keyword returns."}
+    logger.info(f"[Visibility Agent] Scan complete. Visible on {shelf_stats.get('visible', 0)} / {shelf_stats.get('total', 0)} keyword returns. Score: {shelf_stats.get('score', 0.0)}%")
     await asyncio.sleep(0.5)
 
     # --- FINAL RESULT ---
