@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shelves-finder-v2-secrets
+type: Opaque
+stringData:
+  # Paste your raw, unencoded keys here directly from your .env file.
+  # NOTE: real values are intentionally NOT committed. Fill these in locally
+  # (or manage via a real secrets manager) before applying to the cluster.
+  OPENAI_API_KEY: "REPLACE_ME"
+  SERPER_API_KEY: "REPLACE_ME"
+  WEBSCRAPING_API_KEY: "REPLACE_ME"
+  SMTP_SERVER: "smtp.gmail.com"
+  SMTP_PORT: "587"
+  SMTP_USERNAME: "REPLACE_ME"
+  SMTP_PASSWORD: "REPLACE_ME"
+  SMTP_CC_EMAIL: "REPLACE_ME"
+  ANTHROPIC_API_KEY: "REPLACE_ME"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shelves-finder-v2-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: shelves-finder-v2
+  template:
+    metadata:
+      labels:
+        app: shelves-finder-v2
+    spec:
+      containers:
+      - name: shelves-finder-v2
+        image: 338071012734.dkr.ecr.us-east-1.amazonaws.com/shelves-finder:v2-latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: USE_GOOGLE_SHEETS
+          value: "true"
+        - name: GOOGLE_SHEET_ID
+          value: "1FGOKKNpUF9go3bG5KgE61QaQlzqr9r1i6FFYXHEhLCY"
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/app/backend/secrets/credentials.json"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: OPENAI_API_KEY
+        - name: SERPER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: SERPER_API_KEY
+        - name: WEBSCRAPING_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: WEBSCRAPING_API_KEY
+        - name: SMTP_SERVER
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: SMTP_SERVER
+        - name: SMTP_PORT
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: SMTP_PORT
+        - name: SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: SMTP_USERNAME
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: SMTP_PASSWORD
+        - name: SMTP_CC_EMAIL
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: SMTP_CC_EMAIL
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: shelves-finder-v2-secrets
+              key: ANTHROPIC_API_KEY
+        - name: LLM_PROVIDER
+          value: "claude"
+        - name: CLAUDE_CHAT_MODEL
+          value: "claude-haiku-4-5"
+        - name: CLAUDE_ORCHESTRATOR_MODEL
+          value: "claude-sonnet-4-5"
+        - name: OPENAI_CHAT_MODEL
+          value: "gpt-4.1-nano"
+        - name: OPENAI_ORCHESTRATOR_MODEL
+          value: "gpt-4o-mini"
+        - name: V2_MAX_ROUNDS
+          value: "5"
+        - name: V2_TARGET_MISSING_COUNT
+          value: "3"
+        - name: V2_BUDGET_LIMIT
+          value: "0.50"
+        volumeMounts:
+        - name: google-credentials-volume
+          mountPath: "/app/backend/secrets"
+          readOnly: true
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+      volumes:
+      - name: google-credentials-volume
+        secret:
+          secretName: google-credentials
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shelves-finder-v2-service
+  annotations:
+    # Tell AWS to use your specific ACM Certificate
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:us-east-1:338071012734:certificate/a7155ce7-9336-43d2-ba37-023b30943997"
+    # Ensure ONLY port 443 uses SSL on the LoadBalancer
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    # Route HTTPS traffic from LB to HTTP on your container
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+spec:
+  type: LoadBalancer
+  selector:
+    app: shelves-finder-v2
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8000
+    - name: https
+      protocol: TCP
+      port: 443          # The external HTTPS port
+      targetPort: 8000   # The internal HTTP port on your app

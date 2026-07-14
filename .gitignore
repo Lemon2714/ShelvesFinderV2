@@ -1,0 +1,40 @@
+# Environments
+.env
+backend/.env
+backend/.env.example
+
+# Documentation (Requested)
+docs/
+
+# Google Cloud Secrets & Data
+backend/credentials.json
+backend/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Node / Frontend
+node_modules/
+dist/
+.npm/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Generated demo media artifacts (keep the scripts, not the binaries)
+media/narration/
+media/video/
+media/*.wav
+media/*.webm
+media/*.mp4

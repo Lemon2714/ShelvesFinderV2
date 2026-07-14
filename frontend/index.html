@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shelves Finder v2 | Agentic AI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/driver.js@1.3.1/dist/driver.css">
+    <link rel="stylesheet" href="styles.css?v=15">
+</head>
+
+<body>
+    <div class="blob blob-1"></div>
+    <div class="blob blob-2"></div>
+
+    <div class="app-container">
+
+        <!-- Header -->
+        <header class="glass-panel">
+            <div class="logo">
+                <img src="optiwise_logo.png" alt="Optiwise Logo" style="height: 2.5rem; width: auto; object-fit: contain;" />
+                <h1>Shelves <span class="gradient-text">Finder</span></h1>
+            </div>
+            <button id="howItWorksBtn" class="how-btn" type="button" title="Take a guided tour of every feature">
+                <i data-lucide="help-circle"></i><span>How it works</span>
+            </button>
+        </header>
+
+        <!-- Input Section -->
+        <main>
+            <div class="search-box glass-panel">
+                <div class="input-wrapper">
+                    <i data-lucide="link" class="input-icon"></i>
+                    <input type="url" id="urlInput" placeholder="Paste a Walmart Product URL here..." autocomplete="off" spellcheck="false" />
+
+                    <!-- v1 / v2 mode selector -->
+                    <div class="mode-selector">
+                        <button class="mode-btn active" id="modeV1Btn" title="Basic: Fixed 5-step pipeline">Basic</button>
+                        <button class="mode-btn" id="modeV2Btn" title="Advance: ReAct agentic loop">Advance</button>
+                    </div>
+
+                    <!-- Auto/Manual toggle (v1 only) -->
+                    <div class="toggle-container" id="v1ToggleContainer">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="autoModeToggle">
+                            <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">Auto</span>
+                    </div>
+
+                    <button id="analyzeBtn" class="primary-btn">
+                        <span>Analyze</span>
+                        <i data-lucide="arrow-right"></i>
+                    </button>
+                </div>
+
+                <!-- v2 settings toggle (shown only in v2 mode) -->
+                <div class="v2-settings-toggle hidden" id="v2SettingsToggle">
+                    <button class="v2-settings-btn" id="v2SettingsBtn" type="button">
+                        <svg class="v2-settings-icon" viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+                        Settings
+                        <svg class="v2-settings-chevron" viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+                    </button>
+                </div>
+
+                <div class="v2-settings-panel hidden" id="v2SettingsPanel">
+                    <div class="v2-config" id="v2Config">
+                        <div class="v2-config-item">
+                            <label>LLM Provider</label>
+                            <select id="v2LlmProvider" class="v2-provider-select">
+                                <option value="claude">Claude</option>
+                                <option value="openai">OpenAI</option>
+                            </select>
+                        </div>
+                        <div class="v2-config-item v2-config-divider"></div>
+                        <div class="v2-config-item">
+                            <label>Max Rounds</label>
+                            <input type="number" id="v2MaxRounds" value="5" min="1" max="20">
+                        </div>
+                        <div class="v2-config-item">
+                            <label>Target Missing</label>
+                            <input type="number" id="v2TargetMissing" value="3" min="1" max="20">
+                        </div>
+                        <div class="v2-config-item">
+                            <label>Budget (USD)</label>
+                            <input type="number" id="v2Budget" value="0.50" min="0.01" max="5.00" step="0.10">
+                        </div>
+                        <div class="v2-config-item v2-config-divider"></div>
+                        <div class="v2-config-item">
+                            <label class="v2-checkbox-label" for="v2IncludeBranded" title="When checked, the agent also searches using keywords that include the brand name (e.g. 'Ensure protein shake'). Useful when the product has strong brand shelf presence.">
+                                <input type="checkbox" id="v2IncludeBranded" class="v2-checkbox">
+                                <span class="v2-checkbox-custom"></span>
+                                Branded Keywords
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="v2-instructions" id="v2Instructions">
+                        <div class="v2-instructions-header">
+                            <div class="v2-inst-label-row">
+                                <span class="v2-inst-label">Agent Context</span>
+                                <span class="v2-inst-hint">optional — helps the agent focus on the right shelves</span>
+                            </div>
+                        </div>
+                        <textarea
+                            id="v2UserInstructions"
+                            class="v2-instructions-input"
+                            rows="3"
+                            placeholder="Tell the agent what to focus on. Examples:&#10;• 'This is a probiotic supplement — focus on pharmacy, digestive health, and wellness shelves'&#10;• 'FSA/HSA eligible product — prioritize health and medical categories'&#10;• 'Look for baby care aisles in addition to nutrition shelves'"
+                        ></textarea>
+                    </div>
+                </div>
+
+                <div class="error-msg" id="errorMsg">Please enter a valid URL.</div>
+            </div>
+
+            <div class="results-container hidden" id="resultsContainer">
+
+                <!-- ===================================================
+                     v1 Agent Stepper (shown in v1 mode)
+                     =================================================== -->
+                <div class="stepper glass-panel" id="agentStepper">
+                    <h3><i data-lucide="cpu"></i> Agent Processing</h3>
+                    <ul class="step-list">
+                        <li class="step waiting" id="step-scraping">
+                            <div class="step-icon"><i data-lucide="globe" class="default-icon"></i><div class="spinner"></div></div>
+                            <div class="step-content"><h4>Data Extraction</h4><p class="step-message">Waiting...</p><div class="step-output hidden" id="output-scraping"></div></div>
+                        </li>
+                        <li class="step waiting" id="step-keywords">
+                            <div class="step-icon"><i data-lucide="sparkles" class="default-icon"></i><div class="spinner"></div></div>
+                            <div class="step-content"><h4>LLM Keyword Analysis</h4><p class="step-message">Waiting...</p><div class="step-output hidden" id="output-keywords"></div></div>
+                        </li>
+                        <li class="step waiting" id="step-search">
+                            <div class="step-icon"><i data-lucide="search" class="default-icon"></i><div class="spinner"></div></div>
+                            <div class="step-content"><h4>Search Discovery</h4><p class="step-message">Waiting...</p><div class="step-output hidden" id="output-search"></div></div>
+                        </li>
+                        <li class="step waiting" id="step-evaluation">
+                            <div class="step-icon"><i data-lucide="bar-chart-2" class="default-icon"></i><div class="spinner"></div></div>
+                            <div class="step-content"><h4>Similarity Evaluation</h4><p class="step-message">Waiting...</p><div class="step-output hidden" id="output-evaluation"></div></div>
+                        </li>
+                        <li class="step waiting" id="step-visibility">
+                            <div class="step-icon"><i data-lucide="eye" class="default-icon"></i><div class="spinner"></div></div>
+                            <div class="step-content"><h4>Shelf Visibility Check</h4><p class="step-message">Waiting...</p><div class="step-output hidden" id="output-visibility"></div></div>
+                        </li>
+                    </ul>
+                    <div class="manual-controls hidden" id="manualControls">
+                        <button id="resetBtn" class="secondary-btn" style="border-color: var(--error); color: var(--error); margin-right: 1rem;">
+                            <i data-lucide="rotate-ccw"></i><span>Reset</span>
+                        </button>
+                        <button id="continueBtn" class="secondary-btn hidden">
+                            <span>Continue to Next Step</span><i data-lucide="chevron-down"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- ===================================================
+                     v2 Agent Panel (shown in v2 mode)
+                     =================================================== -->
+                <div class="v2-agent-panel glass-panel hidden" id="v2AgentPanel">
+                    <div class="v2-panel-header">
+                        <h3><i data-lucide="scan-search"></i> Shelves Finder Processing</h3>
+                        <div class="v2-status-row">
+                            <span class="v2-round-badge" id="v2RoundBadge">Round 0</span>
+                            <span class="v2-cost-badge" id="v2CostBadge">$0.000000</span>
+                            <button id="v2ResetBtn" class="secondary-btn" style="border-color: var(--error); color: var(--error); padding: 0.25rem 0.6rem; font-size: 0.8rem;">
+                                <i data-lucide="rotate-ccw"></i><span>Reset</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Setup phases -->
+                    <div class="v2-setup-steps" id="v2SetupSteps">
+                        <div class="v2-setup-step" id="v2StepScraping">
+                            <i data-lucide="globe"></i>
+                            <span class="v2-setup-label">Scraping</span>
+                            <span class="v2-setup-msg" id="v2MsgScraping">Waiting...</span>
+                        </div>
+                        <div class="v2-setup-step" id="v2StepKeywords">
+                            <i data-lucide="sparkles"></i>
+                            <span class="v2-setup-label">Keywords</span>
+                            <span class="v2-setup-msg" id="v2MsgKeywords">Waiting...</span>
+                        </div>
+                    </div>
+
+                    <!-- Agent reasoning log -->
+                    <div class="v2-reasoning-log" id="v2ReasoningLog">
+                        <p class="v2-log-placeholder">Agent activity will appear here...</p>
+                    </div>
+
+                    <!-- Live stats bar -->
+                    <div class="v2-stats-bar" id="v2StatsBar">
+                        <div class="v2-stat-item">
+                            <span class="v2-stat-label">PAGES FOUND</span>
+                            <span class="v2-stat-val" id="v2StatDiscovered">0</span>
+                        </div>
+                        <div class="v2-stat-item">
+                            <span class="v2-stat-label">CHECKED</span>
+                            <span class="v2-stat-val" id="v2StatChecked">0</span>
+                        </div>
+                        <div class="v2-stat-item">
+                            <span class="v2-stat-label">MISSING</span>
+                            <span class="v2-stat-val miss" id="v2StatMissing">0</span>
+                        </div>
+                        <div class="v2-stat-item">
+                            <span class="v2-stat-label">KEYWORDS TRIED</span>
+                            <span class="v2-stat-val" id="v2StatKeywords">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Final Results Panel (shared between v1 and v2) -->
+                <div class="final-results glass-panel hidden" id="finalResultsPanel" style="padding-bottom: 6rem;">
+                    <div class="result-header">
+                        <div class="title-group">
+                            <h2 id="finalTitle">Product Title</h2>
+                            <div class="product-meta" id="productMeta">
+                                <img id="productImage" class="product-image hidden" alt="Product image" />
+                                <span id="productPrice" class="product-price hidden"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid result-section hidden" id="visibilityDashboard">
+                        <div class="dash-panel dash-distribution">
+                            <div class="dash-panel-header">
+                                <h3>Discoverability Dashboard</h3>
+                                <span class="dash-pill" id="dashStatusPill">UNKNOWN</span>
+                            </div>
+                            <div class="dash-bar-container">
+                                <div class="dash-bar-label">Missing Items <span id="dashBarMissPct" style="float: right; color: var(--error); font-weight: bold;">0%</span></div>
+                                <div class="dash-progress-track"><div class="dash-progress-fill miss" id="dashFillMiss" style="width: 0%;"><span class="dash-progress-text" id="dashTextMiss">0 / 0</span></div></div>
+                            </div>
+                            <div class="dash-bar-container">
+                                <div class="dash-bar-label">Found Items <span id="dashBarFoundPct" style="float: right; color: var(--success); font-weight: bold;">0%</span></div>
+                                <div class="dash-progress-track"><div class="dash-progress-fill found" id="dashFillFound" style="width: 0%;"><span class="dash-progress-text" id="dashTextFound">0 / 0</span></div></div>
+                            </div>
+                            <div class="dash-stats-row">
+                                <div class="dash-stat"><div class="val miss" id="dashBtmMiss">0</div><div class="lbl">MISSING</div></div>
+                                <div class="dash-stat"><div class="val found" id="dashBtmFound">0</div><div class="lbl">FOUND</div></div>
+                                <div class="dash-stat"><div class="val total" id="dashBtmTotal">0</div><div class="lbl">TOTAL</div></div>
+                            </div>
+                        </div>
+                        <div class="dash-col-right">
+                            <div class="dash-panel text-center">
+                                <div class="dash-label">Discoverability Score</div>
+                                <div class="dash-score-huge" id="dashScoreHuge">0%</div>
+                                <div class="dash-progress-track slim"><div class="dash-progress-fill found slim" id="dashScoreBar" style="width: 0%;"></div></div>
+                                <div class="dash-risk-text" id="dashRiskLevel">UNKNOWN LEVEL</div>
+                            </div>
+                            <div class="dash-panel text-center">
+                                <div class="dash-label">Risk Assessment</div>
+                                <div class="dash-risk-huge miss" id="dashRiskHuge">EVALUATING</div>
+                                <div class="dash-risk-desc" id="dashRiskDesc">Waiting for data...</div>
+                            </div>
+                        </div>
+                        <div class="dash-banner" id="dashBanner">
+                            <strong>Action Required:</strong> <span id="dashBannerMsg">Loading...</span>
+                        </div>
+                    </div>
+
+                    <div class="result-section">
+                        <h3>Extracted Search Intent</h3>
+                        <div id="keywordContainer"></div>
+                    </div>
+
+                    <!-- Floating Cost Badge -->
+                    <div id="sfCostBadge" style="position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem;">
+                        <span style="font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">SF Version</span>
+                        <div id="costContainer" class="cost-display" style="background: var(--bg-card); border: 1px solid var(--border); box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin: 0; padding: 0.5rem 0.75rem;">
+                            <i data-lucide="banknote" style="width: 1rem; height: 1rem; color: var(--success);"></i>
+                            <span id="aiCostValue">0.000000</span>
+                        </div>
+                    </div>
+
+                    <div class="result-section">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                            <h3 style="margin-bottom: 0;">Recommended Category Pages</h3>
+                            <button id="copyUrlsBtn" class="secondary-btn" style="padding: 0.25rem 0.75rem; font-size: 0.85rem;">
+                                <i data-lucide="copy"></i><span>Copy URLs</span>
+                            </button>
+                        </div>
+                        <div class="url-cards" id="urlsContainer"></div>
+                    </div>
+
+                    <!-- Visibility Dashboard (v2 only — shows page depth & placement quality) -->
+                    <div class="dashboard-grid result-section hidden" id="visibilityDashboardPanel">
+                        <div class="dash-panel dash-distribution">
+                            <div class="dash-panel-header">
+                                <h3>Visibility Dashboard</h3>
+                                <span class="dash-pill" id="visStatusPill">UNKNOWN</span>
+                            </div>
+                            <div class="dash-bar-container">
+                                <div class="dash-bar-label">Page 1 — Prime placement <span id="visBarP1Pct" style="float:right;color:#10b981;font-weight:bold;">0%</span></div>
+                                <div class="dash-progress-track"><div class="dash-progress-fill found" id="visFillP1" style="width:0%;"><span class="dash-progress-text" id="visTextP1">0 shelves</span></div></div>
+                            </div>
+                            <div class="dash-bar-container">
+                                <div class="dash-bar-label">Page 2 — Moderate depth <span id="visBarP2Pct" style="float:right;color:#f59e0b;font-weight:bold;">0%</span></div>
+                                <div class="dash-progress-track"><div class="dash-progress-fill vis-page2" id="visFillP2" style="width:0%;"><span class="dash-progress-text" id="visTextP2">0 shelves</span></div></div>
+                            </div>
+                            <div class="dash-bar-container">
+                                <div class="dash-bar-label">Page 3+ — Buried <span id="visBarP3Pct" style="float:right;color:#ef4444;font-weight:bold;">0%</span></div>
+                                <div class="dash-progress-track"><div class="dash-progress-fill miss" id="visFillP3" style="width:0%;"><span class="dash-progress-text" id="visTextP3">0 shelves</span></div></div>
+                            </div>
+                            <div class="dash-stats-row">
+                                <div class="dash-stat"><div class="val found" id="visStatP1">0</div><div class="lbl">PAGE 1</div></div>
+                                <div class="dash-stat"><div class="val total" id="visStatP2">0</div><div class="lbl">PAGE 2</div></div>
+                                <div class="dash-stat"><div class="val miss" id="visStatP3">0</div><div class="lbl">PAGE 3+</div></div>
+                                <div class="dash-stat"><div class="val" id="visStatAvg" style="color:#c3272e;">-</div><div class="lbl">AVG PAGE</div></div>
+                            </div>
+                        </div>
+                        <div class="dash-col-right">
+                            <div class="dash-panel text-center">
+                                <div class="dash-label">Visibility Score</div>
+                                <div class="dash-score-huge" id="visScoreHuge">0%</div>
+                                <div class="dash-progress-track slim"><div class="dash-progress-fill found slim" id="visScoreBar" style="width:0%;"></div></div>
+                                <div class="dash-risk-text" id="visRiskLevel">UNKNOWN LEVEL</div>
+                            </div>
+                            <div class="dash-panel text-center">
+                                <div class="dash-label">Placement Quality</div>
+                                <div class="dash-risk-huge" id="visQualityHuge">EVALUATING</div>
+                                <div class="dash-risk-desc" id="visQualityDesc">Waiting for data...</div>
+                            </div>
+                        </div>
+                        <div class="dash-banner" id="visBanner">
+                            <strong>Visibility Insight:</strong> <span id="visBannerMsg">Loading...</span>
+                        </div>
+                    </div>
+
+                    <!-- Shelf Placement table (v2 only — per-shelf page depth for found shelves) -->
+                    <div class="result-section hidden" id="visibilityTableSection">
+                        <h3>Shelf Placement Detail</h3>
+                        <div class="url-cards" id="visibilityTableContainer"></div>
+                    </div>
+
+                    <div class="result-section" style="margin-top: 1.5rem; background: rgba(0,0,0,0.1); border-radius: 0.5rem; padding: 1rem;">
+                        <h3 style="margin-bottom: 0.5rem;">Email Final Results</h3>
+                        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">Enter comma-separated email addresses to receive the full report.</p>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <input type="text" id="emailRecipients" placeholder="e.g. team@example.com" style="flex: 1; min-width: 250px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); padding: 0.5rem 0.75rem; border-radius: 0.25rem; color: var(--text-primary);">
+                            <button id="sendEmailBtn" class="primary-btn" style="padding: 0.5rem 1rem;">
+                                <i data-lucide="send"></i><span>Send Email</span>
+                            </button>
+                        </div>
+                        <div id="emailStatusMsg" style="font-size: 0.85rem; margin-top: 0.5rem; font-weight: 500;"></div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/driver.js@1.3.1/dist/driver.js.iife.js"></script>
+    <script src="app.js?v=21"></script>
+</body>
+</html>

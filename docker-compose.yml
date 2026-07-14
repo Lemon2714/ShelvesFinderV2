@@ -1,0 +1,13 @@
+services:
+  shelves-finder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shelves-finder
+    ports:
+      - "8000:8000"
+    env_file:
+      - backend/.env
+    volumes:
+      - ./backend/data:/app/backend/data
+    restart: unless-stopped
