@@ -169,9 +169,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!window.lastDiscoveredData || !window.lastDiscoveredData.length) return;
             let text = "Recommended Category Pages:\n\n";
             window.lastDiscoveredData.forEach(item => {
-                text += `${item.title} — Walmart Digital Shelf:\n${item.url}\n\n`;
                 if (item.brandUrl && item.brandUrl !== item.url)
                     text += `${item.title} — Digital Shelf (Brand Filter):\n${item.brandUrl}\n\n`;
+                text += `${item.title} — Walmart Digital Shelf:\n${item.url}\n\n`;
             });
             navigator.clipboard.writeText(text).then(() => {
                 const span = copyUrlsBtn.querySelector('span');
@@ -230,6 +230,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (out) { out.classList.add('hidden'); out.innerHTML = ''; }
         });
         finalResultsPanel.classList.add('hidden');
+        ['visibilityDashboardPanel', 'organicVisibilityDashboardPanel'].forEach(id => {
+            const panel = document.getElementById(id);
+            if (panel) panel.classList.add('hidden');
+        });
         manualControls.classList.add('hidden');
         continueBtn.classList.add('hidden');
         keywordContainer.innerHTML = '';
@@ -264,6 +268,8 @@ document.addEventListener('DOMContentLoaded', () => {
         finalResultsPanel.classList.add('hidden');
         const visPanel = document.getElementById('visibilityDashboardPanel');
         if (visPanel) visPanel.classList.add('hidden');
+        const organicPanel = document.getElementById('organicVisibilityDashboardPanel');
+        if (organicPanel) organicPanel.classList.add('hidden');
         keywordContainer.innerHTML = '';
         urlsContainer.innerHTML = '';
         analyzeBtn.disabled = true;
@@ -369,9 +375,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         keywordContainer.innerHTML = '';
         urlsContainer.innerHTML = '';
-        const visTable = document.getElementById('visibilityTableContainer');
-        if (visTable) visTable.innerHTML = '';
-        ['visibilityDashboard', 'visibilityDashboardPanel', 'visibilityTableSection'].forEach(id => {
+        ['visibilityDashboard', 'visibilityDashboardPanel', 'organicVisibilityDashboardPanel'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.classList.add('hidden');
         });
@@ -445,10 +449,10 @@ document.addEventListener('DOMContentLoaded', () => {
             { element: '.result-header', ...pop('8. Product summary', 'When complete, results open with the product title, image, and price so you know exactly what was analyzed.') },
             { element: '#visibilityDashboard', ...pop('9. Discoverability Dashboard', 'How many shelves your product is found on vs missing from — with an overall discoverability score and risk level.') },
             { element: '#keywordContainer', ...pop('10. Extracted Search Intent', 'The keywords the AI inferred shoppers would use to find this product. Each links to a live Walmart search.') },
-            { element: '#urlsContainer', ...pop('11. Recommended Category Pages', 'Every discovered shelf with its keyword & rank. The <b>Status</b> column shows <b>B</b> (brand carried on the shelf) and <b>P</b> (your product found there).') },
+            { element: '#urlsContainer', ...pop('11. Recommended Category Pages', 'Compare the brand-filtered shelf, the general Walmart shelf, and organic visibility for every discovered category page.') },
             { element: '#copyUrlsBtn', ...pop('Copy URLs', 'One click copies all recommended category page URLs to your clipboard.') },
             { element: '#visibilityDashboardPanel', ...pop('12. Visibility Dashboard (Advance)', 'Across all keyword returns checked, this scores how many place your product <b>On the First Page</b> vs <b>Not on the First Page</b>.') },
-            { element: '#visibilityTableSection', ...pop('13. Shelf Placement Detail', 'Per-shelf placement based on visibility and discoverability: <b>Organic</b>, <b>Sponsor</b>, or <b>Not found</b>.') },
+            { element: '#organicVisibilityDashboardPanel', ...pop('13. Organic Visibility Dashboard (Advance)', 'Shows how often your product is both visible and discoverable without relying on ad-driven presence.') },
             { element: '#emailRecipients', ...pop('14. Email the report', 'Send the full report to one or more recipients (comma-separated) for sharing with your team.'), onHighlightStarted: () => { finalResultsPanel.scrollIntoView({ behavior: 'smooth', block: 'end' }); } },
             {
                 popover: {
@@ -839,9 +843,9 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         renderFinalResults(normalised);
 
-        // Visibility Dashboard — driven by the base-shelf Visibility signal.
+        // Advanced dashboards use the per-shelf visibility signals.
         renderVisibilityDashboardPanel(report.shelf_results || []);
-        renderVisibilityTable(report.shelf_results || [], report.product_brand || '');
+        renderOrganicVisibilityDashboardPanel(report.shelf_results || []);
     }
 
     // -----------------------------------------------------------------------
@@ -863,14 +867,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Derive a readable category name from a Walmart browse URL.
     function deriveCategoryName(url) {
-        let categoryName = url.split('/').pop().replace(/-/g, ' ');
-        const parts = url.split('/');
+        const cleanUrl = String(url || '').split(/[?#]/)[0];
+        const parts = cleanUrl.split('/').filter(Boolean);
+        let categoryName = (parts[parts.length - 1] || 'Category').replace(/-/g, ' ');
         const bi = parts.indexOf('browse');
         if (bi !== -1 && bi < parts.length - 1) {
             const segs = [];
             for (let i = bi + 1; i < parts.length; i++) {
                 let p = parts[i];
-                if (p.includes('_') || (p.length > 25 && !p.includes('-'))) break;
+                // Numeric-only trailing segments are result/rank identifiers,
+                // not part of the shopper-facing category hierarchy.
+                if (/^\d+$/.test(p) || p.includes('_') || (p.length > 25 && !p.includes('-'))) break;
                 if (p) segs.push(p.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
             }
             if (segs.length) categoryName = segs.join(' > ');
@@ -904,8 +911,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const icon = on ? 'check' : 'x';
         const color = on ? 'var(--success)' : 'var(--error)';
         const label = on ? 'Page 1' : 'Not on first page';
-        return `<span class="status-chip" title="Visibility (Ads) — position on the general Walmart Digital Shelf" style="align-items:flex-start;">
-                    <span class="status-chip-label">Visibility (Ads)</span>
+        return `<span class="status-chip" title="Visibility (including ads) — position on the general Walmart Digital Shelf" style="align-items:flex-start;">
+                    <span class="status-chip-label">Visibility (including ads)</span>
                     <span style="display:inline-flex;align-items:center;gap:0.25rem;font-size:0.75rem;font-weight:600;color:${color};">
                         <i data-lucide="${icon}" style="width:14px;height:14px;"></i>${label}
                     </span>
@@ -964,7 +971,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             const hdr = document.createElement('div');
             hdr.className = 'recommended-grid recommended-grid-header';
-            hdr.innerHTML = `<div class="recommended-keyword-header"><span>Keyword</span><span>Rank</span></div><div>Walmart Digital Shelf</div><div>Digital Shelf (Brand Filter)</div><div class="recommended-organic-header">Organic Visibility</div>`;
+            hdr.innerHTML = `<div class="recommended-keyword-header"><span>Keyword</span><span>Rank</span></div><div>Digital Shelf (Brand Filter)</div><div>Walmart Digital Shelf</div><div class="recommended-organic-header">Organic Visibility</div>`;
             urlsContainer.appendChild(hdr);
 
             data.browse_pages.forEach(item => {
@@ -979,7 +986,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 window.lastDiscoveredData.push({ title: categoryName, url, brandUrl, keyword, position: item?.position || null });
 
                 // Resolve the three visibility signals for this shelf.
-                //   Visibility (Ads) — product on the base/general shelf.
+                //   Visibility (including ads) — product on the base/general shelf.
                 //   Discoverability  — product on the brand-filtered shelf (Page 1 / not).
                 //   Organic          — Visibility AND Discoverability.
                 // v1 reads shelf_stats.details[url] = {visibility, discoverability, organic};
@@ -1015,10 +1022,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.className = 'recommended-grid recommended-grid-row';
                 row.innerHTML = `
                     <div class="result-keyword-col recommended-keyword-cell"><span class="keyword-badge">${keyword}</span>${posText}</div>
-                    <a href="${url}" target="_blank" class="url-card recommended-base-link"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
-                    <div class="recommended-status recommended-base-status">${visHtml}</div>
                     <a href="${brandUrl}" target="_blank" class="url-card recommended-brand-link"><div class="url-info"><span class="url-title">${categoryName} (Brand Filter)</span></div><i data-lucide="external-link"></i></a>
                     <div class="recommended-status recommended-brand-status">${discoverabilityHtml}</div>
+                    <a href="${url}" target="_blank" class="url-card recommended-base-link"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
+                    <div class="recommended-status recommended-base-status">${visHtml}</div>
                     <div class="result-found-col recommended-organic-cell">${organicHtml}</div>`;
                 urlsContainer.appendChild(row);
             });
@@ -1150,58 +1157,70 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // -----------------------------------------------------------------------
-    // Visibility table (v2 only) — per-shelf placement classification
+    // Organic Visibility Dashboard (v2 only)
+    // Organic visibility requires both the base and brand-filtered shelf
+    // signals, so it represents visibility that is not dependent on ads.
     // -----------------------------------------------------------------------
-    // Placement is derived exclusively from the shelf visibility signals.
-    // Organic = visible + discoverable; Sponsor = visible + not discoverable;
-    // all remaining combinations are Not found.
-    function placementInfo(s) {
-        const visibility = s.visibility === true;
-        const discoverability = s.discoverability === true;
-        if (visibility && discoverability)  return { label: 'Organic', cls: 'organic', rank: 0 };
-        if (visibility && !discoverability) return { label: 'Sponsor', cls: 'sponsor', rank: 1 };
-        return { label: 'Not found', cls: 'notfound', rank: 2 };
-    }
+    function renderOrganicVisibilityDashboardPanel(shelfResults) {
+        const panel = document.getElementById('organicVisibilityDashboardPanel');
+        if (!panel) return;
 
-    function renderVisibilityTable(shelfResults, brand) {
-        const section = document.getElementById('visibilityTableSection');
-        const container = document.getElementById('visibilityTableContainer');
-        if (!section || !container) return;
-
-        container.innerHTML = '';
         const all = shelfResults || [];
+        const total = all.length;
 
-        if (!all.length) {
-            section.classList.add('hidden');
+        if (total === 0) {
+            panel.classList.add('hidden');
             return;
         }
-        section.classList.remove('hidden');
+        panel.classList.remove('hidden');
 
-        // Organic first, Sponsor second, Not found last.
-        const rows = all.slice().sort((a, b) => placementInfo(a).rank - placementInfo(b).rank);
+        const isOrganic = (s) => s.organic === true || (
+            (s.visibility !== undefined ? s.visibility : s.found) === true &&
+            (s.discoverability !== undefined ? s.discoverability : s.brand_found) === true
+        );
+        const organicallyVisible = all.filter(isOrganic).length;
+        const notOrganic = total - organicallyVisible;
+        const foundPct = ((organicallyVisible / total) * 100).toFixed(1);
+        const missingPct = ((notOrganic / total) * 100).toFixed(1);
+        const score = (organicallyVisible / total) * 100;
 
-        const hdr = document.createElement('div');
-        hdr.style.cssText = 'display:flex;gap:1rem;margin-bottom:-0.25rem;font-weight:600;color:var(--text-secondary);font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em;';
-        hdr.innerHTML = `<div style="flex:1;min-width:0;">Shelf (Category)</div><div class="result-keyword-col" style="border:none;"><span>Keyword</span></div><div class="vis-placement-col">Placement</div>`;
-        container.appendChild(hdr);
+        document.getElementById('organicBarFoundPct').textContent = `${foundPct}%`;
+        document.getElementById('organicFillFound').style.width = `${foundPct}%`;
+        document.getElementById('organicTextFound').textContent = `${organicallyVisible} / ${total}`;
+        document.getElementById('organicBarMissingPct').textContent = `${missingPct}%`;
+        document.getElementById('organicFillMissing').style.width = `${missingPct}%`;
+        document.getElementById('organicTextMissing').textContent = `${notOrganic} / ${total}`;
+        document.getElementById('organicStatFound').textContent = organicallyVisible;
+        document.getElementById('organicStatMissing').textContent = notOrganic;
+        document.getElementById('organicStatTotal').textContent = total;
+        document.getElementById('organicScoreHuge').textContent = `${score.toFixed(1)}%`;
+        document.getElementById('organicScoreBar').style.width = `${Math.min(score, 100)}%`;
 
-        rows.forEach(s => {
-            const url = s.url || '';
-            const categoryName = deriveCategoryName(url);
-            const shelfUrl = brandFilterUrl(url, brand);
-            const keyword = s.keyword || '';
-            const { label, cls } = placementInfo(s);
+        const pill = document.getElementById('organicStatusPill');
+        const risk = document.getElementById('organicRiskLevel');
+        const quality = document.getElementById('organicQualityHuge');
+        const description = document.getElementById('organicQualityDesc');
+        const banner = document.getElementById('organicBannerMsg');
 
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;gap:1rem;margin-bottom:0.5rem;flex-wrap:wrap;align-items:center;';
-            row.innerHTML = `
-                <a href="${shelfUrl}" target="_blank" class="url-card" style="flex:1;margin-bottom:0;min-width:0;"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
-                <div class="result-keyword-col"><span class="keyword-badge">${keyword}</span></div>
-                <div class="vis-placement-col"><span class="vis-badge ${cls}">${label}</span></div>`;
-            container.appendChild(row);
-        });
-
-        if (window.lucide) lucide.createIcons({ root: container });
+        if (score >= 80) {
+            pill.textContent = 'STRONG'; pill.className = 'dash-pill healthy';
+            risk.textContent = 'STRONG ORGANIC PRESENCE'; risk.style.color = '#10b981';
+            quality.textContent = 'EXCELLENT'; quality.className = 'dash-risk-huge healthy';
+            description.textContent = `${organicallyVisible} of ${total} keyword returns are organically visible`;
+            banner.textContent = `Excellent organic visibility. Your product appears naturally across ${organicallyVisible} of ${total} keyword returns.`;
+        } else if (score >= 50) {
+            pill.textContent = 'MODERATE'; pill.className = 'dash-pill moderate';
+            risk.textContent = 'GROWING ORGANIC REACH'; risk.style.color = '#f59e0b';
+            quality.textContent = 'MODERATE'; quality.className = 'dash-risk-huge moderate';
+            description.textContent = `${organicallyVisible} of ${total} keyword returns are organically visible`;
+            banner.textContent = `Moderate organic visibility. ${notOrganic} keyword returns still depend on stronger natural shelf presence.`;
+        } else {
+            pill.textContent = 'LOW'; pill.className = 'dash-pill critical';
+            risk.textContent = 'LOW ORGANIC PRESENCE'; risk.style.color = '#ef4444';
+            quality.textContent = 'LIMITED'; quality.className = 'dash-risk-huge miss';
+            description.textContent = `Only ${organicallyVisible} of ${total} keyword returns are organically visible`;
+            banner.textContent = `Organic visibility is limited. Improve relevance and brand-filtered presence across the ${notOrganic} keyword returns where the product is not organically visible.`;
+        }
     }
 
     // -----------------------------------------------------------------------
