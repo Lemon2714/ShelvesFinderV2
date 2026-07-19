@@ -1,7 +1,7 @@
 """Shelf page detection and product ID presence checks."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -9,6 +9,7 @@ from app.tools.shelf_checker import (
     _is_page_not_found,
     analyze_placement,
     check_shelf_visibility,
+    classify_placements,
     fetch_shelf_sync,
 )
 from tests.conftest import HTIGEA_PRODUCT_ID
@@ -20,6 +21,26 @@ def _next_data_html(items: list) -> str:
     return (
         '<html><body>'
         f'<script id="__NEXT_DATA__" type="application/json" nonce="">{payload}</script>'
+        '</body></html>'
+    )
+
+
+def _ranked_next_data_html(items: list) -> str:
+    """Wrap items in Walmart's ordered Page 1 search-result structure."""
+    payload = json.dumps({
+        "props": {
+            "pageProps": {
+                "initialData": {
+                    "searchResult": {
+                        "itemStacks": [{"items": items}],
+                    }
+                }
+            }
+        }
+    })
+    return (
+        '<html><body>'
+        f'<script id="__NEXT_DATA__" type="application/json">{payload}</script>'
         '</body></html>'
     )
 
@@ -50,6 +71,57 @@ class TestAnalyzePlacement:
         assert analyze_placement(html, "123") == {"organic": True, "sponsored": False}
 
 
+class TestClassifyPlacements:
+    def test_same_product_has_separate_organic_and_sponsored_impressions(self) -> None:
+        html = _next_data_html([
+            {"usItemId": "123", "isSponsoredFlag": True, "name": "A ad"},
+            {"usItemId": "123", "isSponsoredFlag": False, "name": "A natural"},
+        ])
+
+        placements = classify_placements(
+            html, "123", visibility=True, discoverability=True
+        )
+
+        assert len(placements) == 2
+        assert placements[0]["sponsored"] is True
+        assert placements[0]["organic"] is False
+        assert placements[0]["discoverability"] is False
+        assert placements[1]["sponsored"] is False
+        assert placements[1]["organic"] is True
+        assert placements[1]["visibility"] is True
+        assert placements[1]["discoverability"] is True
+
+    def test_absolute_ranks_include_other_products_and_first_occurrence_wins(self) -> None:
+        html = _ranked_next_data_html([
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "123", "isSponsoredFlag": True},
+            {"usItemId": "other-2", "isSponsoredFlag": True},
+            {"usItemId": "other-3", "isSponsoredFlag": False},
+            {"usItemId": "123", "isSponsoredFlag": False},
+        ])
+
+        placements = classify_placements(
+            html, "123", visibility=True, discoverability=True
+        )
+
+        assert [p["placement_index"] for p in placements] == [1, 2]
+        assert [p["placement_rank"] for p in placements] == [2, 5]
+        assert placements[0]["sponsored"] is True
+        assert placements[1]["organic"] is True
+
+    def test_unranked_structured_data_does_not_invent_an_exact_rank(self) -> None:
+        html = _next_data_html([
+            {"usItemId": "123", "isSponsoredFlag": False},
+        ])
+
+        placements = classify_placements(
+            html, "123", visibility=True, discoverability=True
+        )
+
+        assert placements[0]["placement_rank"] is None
+        assert placements[0]["classification_source"] == "structured_unranked"
+
+
 class TestIsPageNotFound:
     @pytest.mark.parametrize(
         "snippet",
@@ -72,6 +144,65 @@ class TestIsPageNotFound:
 
 
 class TestFetchShelfSync:
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_preserves_both_placement_types_on_one_page(
+        self, mock_get, mock_settings
+    ) -> None:
+        mock_settings.webscraping_api_key = ""
+        brand_page = MagicMock()
+        brand_page.raise_for_status.return_value = None
+        brand_page.text = f"<html>brand shelf {HTIGEA_PRODUCT_ID}</html>"
+        base_page = MagicMock()
+        base_page.raise_for_status.return_value = None
+        base_page.text = _next_data_html([
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": True},
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+        ])
+        mock_get.side_effect = [brand_page, base_page]
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "Htigea",
+        )
+
+        assert result["organic"] is True
+        assert result["sponsored"] is True
+        assert len(result["placements"]) == 2
+        assert sum(p["organic"] for p in result["placements"]) == 1
+        assert sum(p["sponsored"] for p in result["placements"]) == 1
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_returns_first_absolute_page_one_placement_rank(
+        self, mock_get, mock_settings
+    ) -> None:
+        mock_settings.webscraping_api_key = ""
+        brand_page = MagicMock()
+        brand_page.raise_for_status.return_value = None
+        brand_page.text = f"<html>brand shelf {HTIGEA_PRODUCT_ID}</html>"
+        base_page = MagicMock()
+        base_page.raise_for_status.return_value = None
+        base_page.text = _ranked_next_data_html([
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "other-2", "isSponsoredFlag": True},
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": True},
+            {"usItemId": "other-3", "isSponsoredFlag": False},
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+        ])
+        mock_get.side_effect = [brand_page, base_page]
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "Htigea",
+        )
+
+        assert result["visibility"] is True
+        assert result["placement_rank"] == 3
+        assert [p["placement_rank"] for p in result["placements"]] == [3, 5]
+
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
     def test_visible_and_discoverable_is_organic(self, mock_get, mock_settings) -> None:
@@ -267,7 +398,9 @@ class TestCheckShelfVisibility:
         stats = await check_shelf_visibility(pages, "", "Brand")
         assert stats == {
             "found": 0, "missing": 0, "invalid": 0, "total": 0, "score": 0.0,
-            "visible": 0, "discoverable": 0, "organic": 0, "details": {},
+            "visible": 0, "discoverable": 0, "placements": 0,
+            "organic": 0, "sponsored": 0, "organic_pages": 0,
+            "sponsored_pages": 0, "details": {},
         }
 
     async def test_no_pages_returns_all_zeros(self) -> None:
@@ -279,17 +412,30 @@ class TestCheckShelfVisibility:
         # Three valid shelves + one invalid (None) page.
         canned = {
             "https://www.walmart.com/browse/a/1": {
-                "visibility": True, "discoverability": True, "organic": True,
+                "visibility": True, "discoverability": True,
+                "organic": True, "sponsored": True,
+                "placements": [
+                    {"visibility": True, "discoverability": False,
+                     "organic": False, "sponsored": True},
+                    {"visibility": True, "discoverability": True,
+                     "organic": True, "sponsored": False},
+                ],
                 "brand": True, "product": True, "page": 1,
             },
             "https://www.walmart.com/browse/b/2": {
                 # Visible via ad, but not discoverable → not organic.
-                "visibility": True, "discoverability": False, "organic": False,
+                "visibility": True, "discoverability": False,
+                "organic": False, "sponsored": True,
+                "placements": [
+                    {"visibility": True, "discoverability": False,
+                     "organic": False, "sponsored": True},
+                ],
                 "brand": True, "product": False, "page": 0,
             },
             "https://www.walmart.com/browse/c/3": {
                 # Neither visible nor discoverable.
-                "visibility": False, "discoverability": False, "organic": False,
+                "visibility": False, "discoverability": False,
+                "organic": False, "sponsored": False, "placements": [],
                 "brand": False, "product": False, "page": 0,
             },
             "https://www.walmart.com/browse/d/4": None,   # invalid page
@@ -306,7 +452,11 @@ class TestCheckShelfVisibility:
         assert stats["total"] == 3            # invalid excluded
         assert stats["visible"] == 2
         assert stats["discoverable"] == 1
+        assert stats["placements"] == 3
         assert stats["organic"] == 1
+        assert stats["sponsored"] == 2
+        assert stats["organic_pages"] == 1
+        assert stats["sponsored_pages"] == 2
         # found/missing/score are Discoverability-driven (Discoverability Dashboard).
         assert stats["found"] == 1
         assert stats["missing"] == 2

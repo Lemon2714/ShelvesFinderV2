@@ -63,6 +63,47 @@ class BrowsePage:
 
 
 @dataclass
+class ProductPlacement:
+    """One product placement/impression on a checked shelf page."""
+    placement_index: int
+    visibility: bool
+    discoverability: bool
+    sponsored: bool
+    organic: bool
+    placement_rank: Optional[int] = None
+    classification_source: str = "structured"
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "ProductPlacement":
+        return cls(
+            placement_index=int(value.get("placement_index", 0) or 0),
+            visibility=bool(value.get("visibility")),
+            discoverability=bool(value.get("discoverability")),
+            sponsored=bool(value.get("sponsored")),
+            organic=bool(value.get("organic")),
+            placement_rank=(
+                int(value["placement_rank"])
+                if value.get("placement_rank") is not None
+                else None
+            ),
+            classification_source=str(
+                value.get("classification_source", "structured")
+            ),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "placement_index": self.placement_index,
+            "visibility": self.visibility,
+            "discoverability": self.discoverability,
+            "sponsored": self.sponsored,
+            "organic": self.organic,
+            "placement_rank": self.placement_rank,
+            "classification_source": self.classification_source,
+        }
+
+
+@dataclass
 class ShelfResult:
     """Result of checking whether a product appears on a specific shelf/page."""
     page_url: str
@@ -73,10 +114,12 @@ class ShelfResult:
     keyword: str = ""                # search keyword that discovered this page
     position: int = 0                # rank position in search results
     brand_found: Optional[bool] = None  # True/False if brand carried on shelf; None if not evaluated
-    sponsored: bool = False          # visible on base shelf but not discoverable on brand-filtered shelf
-    organic: bool = False            # visible on base shelf and discoverable on brand-filtered shelf
+    sponsored: bool = False          # True when any placement on this page is sponsored
+    organic: bool = False            # True when any placement on this page is organic
     visibility: bool = False         # product present on the base/general shelf ("Walmart Digital Shelf")
     discoverability: bool = False    # product present on the brand-filtered shelf ("Digital Shelf (Brand Filter)")
+    placement_rank: Optional[int] = None  # first base-shelf Page 1 product-card rank
+    placements: List[ProductPlacement] = field(default_factory=list)
 
 
 @dataclass
@@ -241,6 +284,8 @@ class SessionState:
                 "organic": sr.organic,
                 "visibility": sr.visibility,           # base shelf → Visibility Dashboard
                 "discoverability": sr.discoverability,  # brand shelf → Discoverability Dashboard
+                "placement_rank": sr.placement_rank,
+                "placements": [p.to_dict() for p in sr.placements],
                 "page_number": sr.page_number_found,
                 "confidence": sr.confidence,
                 "keyword": sr.keyword,
@@ -255,6 +300,8 @@ class SessionState:
                 "organic": sr.organic,
                 "visibility": sr.visibility,
                 "discoverability": sr.discoverability,
+                "placement_rank": sr.placement_rank,
+                "placements": [p.to_dict() for p in sr.placements],
                 "page_number": 0,
                 "confidence": sr.confidence,
                 "keyword": sr.keyword,
@@ -267,6 +314,9 @@ class SessionState:
         total_checked = len(all_results)
         visible_count = sum(1 for sr in all_results if sr.visibility)
         discoverable_count = sum(1 for sr in all_results if sr.discoverability)
+        placements = [p for sr in all_results for p in sr.placements]
+        organic_count = sum(1 for p in placements if p.organic)
+        sponsored_count = sum(1 for p in placements if p.sponsored)
 
         return {
             "session_id": self.session_id,
@@ -288,6 +338,14 @@ class SessionState:
                 ),
                 "visible": visible_count,
                 "discoverable": discoverable_count,
+                # Placement/impression-level metrics. Organic and sponsored are
+                # intentionally independent, so both can be non-zero for one page.
+                "placements": len(placements),
+                "organic": organic_count,
+                "sponsored": sponsored_count,
+                # Explicit page-level compatibility metrics for older consumers.
+                "organic_pages": sum(1 for sr in all_results if sr.organic),
+                "sponsored_pages": sum(1 for sr in all_results if sr.sponsored),
                 "details": {
                     sr.page_url: True for sr in self.found_pages
                 },

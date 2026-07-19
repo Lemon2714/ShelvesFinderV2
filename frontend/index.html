@@ -10,7 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lucide@latest"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/driver.js@1.3.1/dist/driver.css">
-    <link rel="stylesheet" href="styles.css?v=21">
+    <link rel="stylesheet" href="styles.css?v=24">
 </head>
 
 <body>
@@ -234,12 +234,12 @@
                                 <span class="dash-pill" id="dashStatusPill">UNKNOWN</span>
                             </div>
                             <div class="dash-bar-container">
-                                <div class="dash-bar-label">Missing Items <span id="dashBarMissPct" style="float: right; color: var(--error); font-weight: bold;">0%</span></div>
-                                <div class="dash-progress-track"><div class="dash-progress-fill miss" id="dashFillMiss" style="width: 0%;"><span class="dash-progress-text" id="dashTextMiss">0 / 0</span></div></div>
-                            </div>
-                            <div class="dash-bar-container">
                                 <div class="dash-bar-label">Found Items <span id="dashBarFoundPct" style="float: right; color: var(--success); font-weight: bold;">0%</span></div>
                                 <div class="dash-progress-track"><div class="dash-progress-fill found" id="dashFillFound" style="width: 0%;"><span class="dash-progress-text" id="dashTextFound">0 / 0</span></div></div>
+                            </div>
+                            <div class="dash-bar-container">
+                                <div class="dash-bar-label">Missing Items <span id="dashBarMissPct" style="float: right; color: var(--error); font-weight: bold;">0%</span></div>
+                                <div class="dash-progress-track"><div class="dash-progress-fill miss" id="dashFillMiss" style="width: 0%;"><span class="dash-progress-text" id="dashTextMiss">0 / 0</span></div></div>
                             </div>
                             <div class="dash-stats-row">
                                 <div class="dash-stat"><div class="val miss" id="dashBtmMiss">0</div><div class="lbl">MISSING</div></div>
@@ -268,15 +268,6 @@
                     <div class="result-section">
                         <h3>Extracted Search Intent</h3>
                         <div id="keywordContainer"></div>
-                    </div>
-
-                    <!-- Floating Cost Badge -->
-                    <div id="sfCostBadge" style="position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem;">
-                        <span style="font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;">SF Version</span>
-                        <div id="costContainer" class="cost-display" style="background: var(--bg-card); border: 1px solid var(--border); box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin: 0; padding: 0.5rem 0.75rem;">
-                            <i data-lucide="banknote" style="width: 1rem; height: 1rem; color: var(--success);"></i>
-                            <span id="aiCostValue">0.000000</span>
-                        </div>
                     </div>
 
                     <div class="result-section">
@@ -328,25 +319,25 @@
                         </div>
                     </div>
 
-                    <!-- Organic Visibility Dashboard (v2 only) -->
+                    <!-- Placement-level organic/sponsored dashboard (v2 only) -->
                     <div class="dashboard-grid organic-dashboard result-section hidden" id="organicVisibilityDashboardPanel">
                         <div class="dash-panel dash-distribution">
                             <div class="dash-panel-header">
-                                <h3>Organic Visibility Dashboard</h3>
+                                <h3>Organic Dashboard</h3>
                                 <span class="dash-pill" id="organicStatusPill">UNKNOWN</span>
                             </div>
                             <div class="dash-bar-container">
-                                <div class="dash-bar-label">Organically Visible <span id="organicBarFoundPct" style="float:right;color:#10b981;font-weight:bold;">0%</span></div>
+                                <div class="dash-bar-label">Organic Placements <span id="organicBarFoundPct" style="float:right;color:#10b981;font-weight:bold;">0%</span></div>
                                 <div class="dash-progress-track"><div class="dash-progress-fill found" id="organicFillFound" style="width:0%;"><span class="dash-progress-text" id="organicTextFound">0 / 0</span></div></div>
                             </div>
                             <div class="dash-bar-container">
-                                <div class="dash-bar-label">Not Organically Visible <span id="organicBarMissingPct" style="float:right;color:#ef4444;font-weight:bold;">0%</span></div>
+                                <div class="dash-bar-label">Sponsored Placements <span id="organicBarMissingPct" style="float:right;color:#ef4444;font-weight:bold;">0%</span></div>
                                 <div class="dash-progress-track"><div class="dash-progress-fill miss" id="organicFillMissing" style="width:0%;"><span class="dash-progress-text" id="organicTextMissing">0 / 0</span></div></div>
                             </div>
                             <div class="dash-stats-row">
-                                <div class="dash-stat"><div class="val found" id="organicStatFound">0</div><div class="lbl">ORGANICALLY VISIBLE</div></div>
-                                <div class="dash-stat"><div class="val miss" id="organicStatMissing">0</div><div class="lbl">NOT ORGANICALLY VISIBLE</div></div>
-                                <div class="dash-stat"><div class="val total" id="organicStatTotal">0</div><div class="lbl">TOTAL KEYWORD RETURNS</div></div>
+                                <div class="dash-stat"><div class="val found" id="organicStatFound">0</div><div class="lbl">KEYWORDS WITH ORGANIC</div></div>
+                                <div class="dash-stat"><div class="val miss" id="organicStatMissing">0</div><div class="lbl">KEYWORDS WITH SPONSORED</div></div>
+                                <div class="dash-stat"><div class="val total" id="organicStatTotal">0</div><div class="lbl">TOTAL KEYWORDS</div></div>
                             </div>
                         </div>
                         <div class="dash-col-right">
@@ -363,7 +354,7 @@
                             </div>
                         </div>
                         <div class="dash-banner" id="organicBanner">
-                            <strong>Organic Visibility Insight:</strong> <span id="organicBannerMsg">Loading...</span>
+                            <strong>Placement Mix Insight:</strong> <span id="organicBannerMsg">Loading...</span>
                         </div>
                     </div>
 
@@ -385,6 +376,6 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/driver.js@1.3.1/dist/driver.js.iife.js"></script>
-    <script src="app.js?v=24"></script>
+    <script src="app.js?v=28"></script>
 </body>
 </html>

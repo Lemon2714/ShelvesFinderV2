@@ -18,7 +18,8 @@ from typing import AsyncGenerator, Dict, Any
 
 from app.config import settings
 from app.models.session_state import (
-    SessionState, AgentAction, BrowsePage, ShelfResult, KEYWORD_LEVELS
+    SessionState, AgentAction, BrowsePage, ShelfResult, ProductPlacement,
+    KEYWORD_LEVELS,
 )
 from app.tools.tool_registry import registry, ToolResult
 from app.services.llm import call_llm, get_active_client
@@ -97,8 +98,6 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
     from app.agents.search_agent import find_browse_pages
 
     keywords: list[str] = args.get("keywords", [])
-    if not keywords and state.keywords_pending:
-        keywords = state.keywords_pending[:5]
 
     logger.info(f"[Orchestrator] SEARCH: {keywords}")
 
@@ -190,10 +189,11 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
     """Execute shelf visibility check on top unchecked pages."""
     from app.tools.shelf_checker import check_shelf_visibility
 
-    max_pages: int = min(args.get("max_pages", 5), 5)
+    max_pages = min(int(args.get("max_pages", 5)), 5)
+
     # Pick top-ranked unchecked pages
     candidates = sorted(
-        [p for p in state.pages_discovered if not p.checked],
+        state.unchecked_pages,
         key=lambda p: p.relevance_score,
         reverse=True,
     )[:max_pages]
@@ -234,8 +234,22 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
             page_found = result.get("page", 0) or 0
             visibility = bool(result.get("visibility"))
             discoverability = bool(result.get("discoverability"))
-            organic = visibility and discoverability
-            sponsored = visibility and not discoverability
+            placements = [
+                ProductPlacement.from_dict(placement)
+                for placement in result.get("placements", [])
+            ]
+            placement_rank = result.get("placement_rank")
+            if placement_rank is None:
+                ranked_placements = [
+                    placement.placement_rank
+                    for placement in placements
+                    if placement.placement_rank is not None
+                ]
+                placement_rank = (
+                    min(ranked_placements) if ranked_placements else None
+                )
+            organic = any(placement.organic for placement in placements)
+            sponsored = any(placement.sponsored for placement in placements)
             logger.info(
                 f"[ShelfCheck] keyword='{page.keyword}' pos={page.position} "
                 f"brand={brand_found} found={found} page={page_found} "
@@ -251,6 +265,8 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 organic=organic,
                 visibility=visibility,
                 discoverability=discoverability,
+                placement_rank=placement_rank,
+                placements=placements,
                 confidence=1.0 if found else 0.0,
                 checked_at_round=state.round_number,
                 keyword=page.keyword,
@@ -499,7 +515,10 @@ def _rule_based_decision(state: SessionState) -> tuple[str, dict]:
         return "evaluate", {"reasoning": "Unranked pages need scoring"}
 
     if state.unchecked_pages:
-        return "check_shelf", {"max_pages": 5, "reasoning": "Ranked unchecked pages available"}
+        return "check_shelf", {
+            "max_pages": 5,
+            "reasoning": "Ranked unchecked pages available",
+        }
 
     if not state.keywords_exhausted:
         return "expand_keywords", {"reasoning": "Current keywords exhausted, expanding"}

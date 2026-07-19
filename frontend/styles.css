@@ -749,46 +749,18 @@ input:checked+.slider:before {
     max-width: 230px;
 }
 
-.result-found-col {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 84px;
-    padding-left: 0.5rem;
-}
-
-.status-pair {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-}
-
-.status-chip {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-}
-
-.status-chip-label {
-    font-size: 0.6rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-}
-
 /* Recommended category pages use shared grid tracks so headers, links, and
    statuses remain level even when a shelf title wraps. */
 .recommended-grid {
     display: grid;
-    grid-template-columns: minmax(180px, 240px) minmax(0, 1fr) minmax(0, 1fr) minmax(96px, 112px);
-    column-gap: 1rem;
+    grid-template-columns: minmax(160px, 190px) minmax(96px, 104px) minmax(0, 1fr) minmax(0, 1fr) minmax(310px, 340px);
+    column-gap: 0;
     min-width: 0;
 }
 
 .recommended-grid-header {
-    align-items: end;
-    margin-bottom: 0.25rem;
+    align-items: center;
+    margin-bottom: 0.5rem;
     color: var(--text-secondary);
     font-size: 0.75rem;
     font-weight: 600;
@@ -797,23 +769,32 @@ input:checked+.slider:before {
     text-transform: uppercase;
 }
 
-.recommended-keyword-header {
-    display: flex;
-    justify-content: space-between;
-    gap: 0.75rem;
+.recommended-grid-header > div {
+    min-width: 0;
+    padding: 0 0.75rem;
 }
 
-.recommended-organic-header {
+.recommended-grid-header > div:first-child {
+    padding-left: 0;
+}
+
+.recommended-rank-header {
+    text-align: center;
+    white-space: normal;
+}
+
+.recommended-rank-cell {
+    text-align: center;
+    white-space: nowrap;
+}
+
+.recommended-placement-header {
     text-align: center;
 }
 
 .recommended-grid-row {
-    grid-template-areas:
-        "keyword brand-link base-link ."
-        "keyword brand-status base-status organic";
-    grid-template-rows: auto auto;
-    align-items: start;
-    row-gap: 0.35rem;
+    grid-template-areas: "keyword rank brand-link base-link placement";
+    align-items: center;
     margin-bottom: 0.5rem;
 }
 
@@ -822,40 +803,113 @@ input:checked+.slider:before {
     width: auto;
     min-width: 0;
     height: 100%;
-    align-items: flex-start;
-    padding-top: 0.25rem;
+    align-items: center;
+    padding: 0.25rem 0.75rem 0.25rem 0;
+    border-right: 0;
+}
+
+.recommended-rank-cell {
+    grid-area: rank;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 0.25rem 0.75rem;
+    border-left: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+
+.recommended-rank-value {
+    font-size: 0.75rem;
+    font-weight: 600;
 }
 
 .recommended-base-link { grid-area: base-link; }
 .recommended-brand-link { grid-area: brand-link; }
-.recommended-base-status { grid-area: base-status; }
-.recommended-brand-status { grid-area: brand-status; }
 
 .recommended-grid-row .url-card {
     min-width: 0;
     margin-bottom: 0;
-    padding-top: 0.25rem;
-    align-items: flex-start;
+    height: 100%;
+    padding: 0.35rem 0.75rem;
+    align-items: center;
+    border-left: 1px solid var(--border-color);
 }
 
-.recommended-status {
-    min-width: 0;
-    min-height: 2rem;
-    padding-left: 0.25rem;
+.recommended-placement-cell {
+    grid-area: placement;
     display: flex;
-    align-items: flex-start;
-}
-
-.recommended-status .status-chip {
-    align-items: flex-start;
-}
-
-.recommended-organic-cell {
-    grid-area: organic;
+    justify-content: center;
     min-width: 0;
-    min-height: 2rem;
+    height: 100%;
+    min-height: 3rem;
+    align-items: center;
+    padding: 0.25rem 0 0.25rem 0.75rem;
+    border-left: 1px solid var(--border-color);
+}
+
+/* Placement Mix keeps all three signals together in the table's rightmost
+   column. Other status chips keep their existing treatment. */
+.placement-mix-statuses {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     align-items: flex-start;
-    padding-top: 0;
+    width: 100%;
+    gap: 0.5rem;
+}
+
+.placement-status-item {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    gap: 0.25rem;
+}
+
+.placement-status-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    padding: 0.42rem 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 750;
+    line-height: 1;
+    letter-spacing: 0.015em;
+    white-space: nowrap;
+}
+
+.placement-pill-present {
+    color: #067647;
+    background: #d1fadf;
+    border-color: #6ce9a6;
+}
+
+.placement-pill-absent {
+    color: #b42318;
+    background: #fee4e2;
+    border-color: #fda29b;
+}
+
+.placement-status-detail {
+    min-height: 0.75rem;
+    color: var(--text-secondary);
+    font-size: 0.6rem;
+    font-weight: 650;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.placement-detail-present {
+    color: #067647;
+}
+
+.placement-detail-absent {
+    color: #b42318;
 }
 
 /* ===================================================================
@@ -1035,21 +1089,25 @@ header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 0.75rem;
     margin-bottom: 1.5rem;
 }
 
 .dash-panel-header h3 {
     margin: 0;
+    min-width: 0;
     font-size: 1.1rem;
     color: #f9fafb;
 }
 
 .dash-pill {
+    flex-shrink: 0;
     padding: 0.25rem 0.75rem;
     border-radius: 20px;
     font-size: 0.75rem;
     font-weight: bold;
     border: 1px solid currentColor;
+    white-space: nowrap;
 }
 .dash-pill.critical { color: #ef4444; background: rgba(239, 68, 68, 0.1); }
 .dash-pill.healthy  { color: #10b981; background: rgba(16, 185, 129, 0.1); }
@@ -1125,6 +1183,11 @@ header {
 .dash-risk-huge.moderate { color: #f59e0b; }
 .dash-risk-desc { font-size: 0.75rem; color: #9ca3af; }
 
+/* Keep Organic Reach aligned with the bottom of the placement panel. */
+.organic-dashboard .dash-col-right > .dash-panel:last-child {
+    flex: 1;
+}
+
 /* Banner */
 .dash-banner {
     grid-column: 1 / -1;
@@ -1160,12 +1223,10 @@ header {
     .recommended-grid-row {
         grid-template-columns: repeat(2, minmax(0, 1fr));
         grid-template-areas:
-            "keyword keyword"
+            "keyword rank"
             "brand-link base-link"
-            "brand-status base-status"
-            "organic organic";
-        padding: 0.75rem 0;
-        border-top: 1px solid var(--border-color);
+            "placement placement";
+        padding: 0.85rem;
     }
 
     .recommended-keyword-cell {
@@ -1176,10 +1237,29 @@ header {
         border-right: 0;
     }
 
-    .recommended-organic-cell {
-        justify-content: flex-start;
+    .recommended-rank-cell {
+        height: auto;
+        padding-top: 0.25rem;
+        border-left: 0;
+        text-align: right;
+    }
+
+    .recommended-grid-row .url-card {
+        padding: 0.65rem 0.25rem;
+        border-left: 0;
+        border-top: 1px solid var(--border-color);
+    }
+
+    .recommended-placement-cell {
+        justify-content: center;
         min-height: 0;
-        padding: 0.35rem 0 0.15rem 0.25rem;
+        padding: 0.75rem 0 0;
+        border-top: 1px solid var(--border-color);
+        border-left: 0;
+    }
+
+    .placement-mix-statuses {
+        max-width: 360px;
     }
 }
 
@@ -1203,14 +1283,12 @@ header {
     }
 
     .recommended-grid-row {
-        grid-template-columns: minmax(0, 1fr);
+        grid-template-columns: minmax(0, 1fr) auto;
         grid-template-areas:
-            "keyword"
-            "brand-link"
-            "brand-status"
-            "base-link"
-            "base-status"
-            "organic";
+            "keyword rank"
+            "brand-link brand-link"
+            "base-link base-link"
+            "placement placement";
     }
 }
 
@@ -2015,42 +2093,37 @@ a:focus-visible {
     letter-spacing: 0.08em;
 }
 
-#sfCostBadge {
-    position: static !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    align-self: flex-end;
-    margin: 0.5rem 0;
-}
-
-#costContainer {
-    box-shadow: none !important;
-}
-
 .keyword-tag,
 .keyword-badge {
     border-radius: 7px;
 }
 
 .recommended-grid {
-    grid-template-columns: minmax(170px, 220px) minmax(0, 1fr) minmax(0, 1fr) minmax(120px, 140px);
+    grid-template-columns: minmax(160px, 190px) minmax(96px, 104px) minmax(0, 1fr) minmax(0, 1fr) minmax(310px, 340px);
 }
 
 .recommended-grid-header {
-    padding: 0 1rem 0.4rem;
+    padding: 0.7rem 1rem;
+    background: #f2f4f7;
+    border: 1px solid #e3e8ef;
+    border-radius: 10px;
 }
 
 .recommended-grid-row {
     margin-bottom: 0.65rem;
+    min-height: 5.25rem;
     padding: 0.9rem 1rem;
     background: #f8fafc;
     border: 1px solid #e3e8ef;
     border-radius: 10px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
 }
 
 .recommended-grid-row:hover {
     border-color: #cdd5df;
     background: #ffffff;
+    box-shadow: 0 3px 10px rgba(16, 24, 40, 0.07);
 }
 
 .recommended-grid-row .url-card {
@@ -2059,10 +2132,6 @@ a:focus-visible {
 
 .recommended-grid-row .url-card:hover {
     color: var(--accent-primary);
-}
-
-.status-chip-label {
-    font-size: 0.65rem;
 }
 
 .dashboard-grid {
@@ -2122,7 +2191,14 @@ a:focus-visible {
     }
 
     .recommended-grid-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         padding: 1rem;
+    }
+}
+
+@media (max-width: 560px) {
+    .recommended-grid-row {
+        grid-template-columns: minmax(0, 1fr) auto;
     }
 }
 
@@ -2181,10 +2257,6 @@ a:focus-visible {
 
     .dash-stats-row {
         flex-direction: column;
-    }
-
-    #sfCostBadge {
-        align-self: flex-start;
     }
 
     .email-report-form .primary-btn {
