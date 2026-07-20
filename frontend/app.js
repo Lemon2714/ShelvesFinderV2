@@ -309,12 +309,16 @@ document.addEventListener('DOMContentLoaded', () => {
             'wireless headphones', 'noise cancelling headphones', 'bluetooth headphones',
             'over ear headphones', 'gaming headset', 'workout earbuds',
         ],
+        // Ordered by relevance_score descending, as the backend now emits them.
+        // Note the noise-cancelling shelf: only 5th on Google, but the closest
+        // match for this product — the ordering the old all-0.5 tie collapse
+        // could never express.
         shelf_results: [
-            { url: 'https://www.walmart.com/browse/electronics/headphones/3944_96469', keyword: 'wireless headphones', position: 1, product_found: true, found: true, brand_found: true, sponsored: true, organic: true, page_number: 1, visibility: true, discoverability: true, placement_rank: 2, placements: [{ placement_index: 1, placement_rank: 2, visibility: true, discoverability: false, sponsored: true, organic: false }, { placement_index: 2, placement_rank: 11, visibility: true, discoverability: true, sponsored: false, organic: true }] },
-            { url: 'https://www.walmart.com/browse/electronics/bluetooth-headphones/3944_96469_1231', keyword: 'bluetooth headphones', position: 2, product_found: true, found: true, brand_found: true, sponsored: false, organic: true, page_number: 1, visibility: true, discoverability: true, placement_rank: 6, placements: [{ placement_index: 1, placement_rank: 6, visibility: true, discoverability: true, sponsored: false, organic: true }] },
-            { url: 'https://www.walmart.com/browse/electronics/over-ear-headphones/3944_96469_4561', keyword: 'over ear headphones', position: 3, product_found: false, found: false, brand_found: true, sponsored: true, organic: false, page_number: 0, visibility: true, discoverability: false, placement_rank: 4, placements: [{ placement_index: 1, placement_rank: 4, visibility: true, discoverability: false, sponsored: true, organic: false }] },
-            { url: 'https://www.walmart.com/browse/electronics/gaming-headsets/3944_96469_7788', keyword: 'gaming headset', position: 4, product_found: true, found: true, brand_found: true, sponsored: false, organic: false, page_number: 1, visibility: false, discoverability: true },
-            { url: 'https://www.walmart.com/browse/electronics/noise-cancelling/3944_96469_9911', keyword: 'noise cancelling headphones', position: 5, product_found: false, found: false, brand_found: false, sponsored: false, organic: false, page_number: 0, visibility: false, discoverability: false },
+            { url: 'https://www.walmart.com/browse/electronics/headphones/3944_96469', keyword: 'wireless headphones', position: 1, relevance_score: 0.94, product_found: true, found: true, brand_found: true, sponsored: true, organic: true, page_number: 1, visibility: true, discoverability: true, placement_rank: 2, placements: [{ placement_index: 1, placement_rank: 2, visibility: true, discoverability: false, sponsored: true, organic: false }, { placement_index: 2, placement_rank: 11, visibility: true, discoverability: true, sponsored: false, organic: true }] },
+            { url: 'https://www.walmart.com/browse/electronics/noise-cancelling/3944_96469_9911', keyword: 'noise cancelling headphones', position: 5, relevance_score: 0.91, product_found: false, found: false, brand_found: false, sponsored: false, organic: false, page_number: 0, visibility: false, discoverability: false },
+            { url: 'https://www.walmart.com/browse/electronics/bluetooth-headphones/3944_96469_1231', keyword: 'bluetooth headphones', position: 2, relevance_score: 0.88, product_found: true, found: true, brand_found: true, sponsored: false, organic: true, page_number: 1, visibility: true, discoverability: true, placement_rank: 6, placements: [{ placement_index: 1, placement_rank: 6, visibility: true, discoverability: true, sponsored: false, organic: true }] },
+            { url: 'https://www.walmart.com/browse/electronics/over-ear-headphones/3944_96469_4561', keyword: 'over ear headphones', position: 3, relevance_score: 0.71, product_found: false, found: false, brand_found: true, sponsored: true, organic: false, page_number: 0, visibility: true, discoverability: false, placement_rank: 4, placements: [{ placement_index: 1, placement_rank: 4, visibility: true, discoverability: false, sponsored: true, organic: false }] },
+            { url: 'https://www.walmart.com/browse/electronics/gaming-headsets/3944_96469_7788', keyword: 'gaming headset', position: 4, relevance_score: 0.42, product_found: true, found: true, brand_found: true, sponsored: false, organic: false, page_number: 1, visibility: false, discoverability: true },
         ],
         shelf_stats: { score: 60.0, found: 3, missing: 2, total: 5, visible: 3, discoverable: 3, placements: 4, organic: 2, sponsored: 2 },
         openai_cost_usd: 0.0381,
@@ -853,6 +857,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 url: sr.url,
                 keyword: sr.keyword || '',
                 position: sr.position || 0,
+                // Embedding relevance the rows are ranked on. Keep null/undefined
+                // distinct from 0 — 0 is "scored, irrelevant", null is "never scored".
+                relevance_score: sr.relevance_score ?? null,
                 found: sr.discoverability ?? sr.product_found ?? sr.found,
                 brand_found: sr.brand_found ?? null,
                 // Per-shelf signals so the table columns reflect the right dashboard.
@@ -1014,7 +1021,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             const hdr = document.createElement('div');
             hdr.className = 'recommended-grid recommended-grid-header';
-            hdr.innerHTML = `<div>Keyword</div><div class="recommended-rank-header" title="Rank within the Google results for this keyword">Google Rank<br>(per keyword)</div><div>Digital Shelf (Brand Filter)</div><div>Walmart Digital Shelf</div><div class="recommended-placement-header">Placement Mix</div>`;
+            hdr.innerHTML = `<div>Keyword</div><div class="recommended-rank-header" title="Rank within the Google results for this keyword">Google Rank<br>(per keyword)</div><div class="recommended-relevance-header" title="Embedding similarity between the product and this shelf. Rows are ordered by this score, highest first.">Relevance<br>(0-1)</div><div>Digital Shelf (Brand Filter)</div><div>Walmart Digital Shelf</div><div class="recommended-placement-header">Placement Mix</div>`;
             urlsContainer.appendChild(hdr);
 
             data.browse_pages.forEach(item => {
@@ -1022,6 +1029,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (typeof url !== 'string') url = String(url);
                 const keyword = typeof item === 'string' ? 'Unknown' : (item.keyword || '');
                 const posText = (item?.position) ? `<span class="recommended-rank-value" title="Google rank #${item.position}">#${item.position}</span>` : '';
+
+                // Relevance explains the row ordering. A score of 0 is a real
+                // measurement (scored, irrelevant) and must still render as
+                // "0.00"; only null/undefined means the shelf was never scored.
+                const rel = item?.relevance_score;
+                const relText = (typeof rel === 'number' && Number.isFinite(rel))
+                    ? `<span class="recommended-relevance-value" title="Embedding similarity to the product: ${rel.toFixed(4)}">${rel.toFixed(2)}</span>`
+                    : `<span class="recommended-relevance-value is-unscored" title="This shelf was not scored for relevance">&mdash;</span>`;
 
                 const categoryName = deriveCategoryName(url);
                 const brandUrl = brandFilterUrl(url, data.product_brand);
@@ -1092,6 +1107,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.innerHTML = `
                     <div class="result-keyword-col recommended-keyword-cell"><span class="keyword-badge">${keyword}</span></div>
                     <div class="recommended-rank-cell">${posText}</div>
+                    <div class="recommended-relevance-cell">${relText}</div>
                     <a href="${brandUrl}" target="_blank" class="url-card recommended-brand-link"><div class="url-info"><span class="url-title">${categoryName} (Brand Filter)</span></div><i data-lucide="external-link"></i></a>
                     <a href="${url}" target="_blank" class="url-card recommended-base-link"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
                     <div class="recommended-placement-cell">${placementMixHtml}</div>`;
