@@ -65,6 +65,40 @@ EXAMPLE_KEYWORD_HINTS = {
 }
 
 
+def assert_ranked_contract(ranked: list[dict], candidate_count: int) -> None:
+    """
+    Shared assertion for evaluate_and_rank's return contract.
+
+    Applied both to the real function and to every test double that stands in
+    for it. The dropped-relevance-score bug survived the suite precisely
+    because the double emitted a "relevance_score" key the real function never
+    produced — the double and the real thing diverged at the broken seam, so
+    the tests passed while production pinned every page to 0.5. Anything
+    substituting for evaluate_and_rank must satisfy this.
+    """
+    from app.agents.evaluation_agent import RELEVANCE_SCORE_KEY
+
+    assert len(ranked) == candidate_count, "ranking must not drop candidates"
+
+    scores = []
+    for row in ranked:
+        assert RELEVANCE_SCORE_KEY in row, (
+            f"ranked row is missing {RELEVANCE_SCORE_KEY!r}: {row}"
+        )
+        assert {"url", "keyword", "position", "title", RELEVANCE_SCORE_KEY} <= set(row)
+        score = row[RELEVANCE_SCORE_KEY]
+        assert score is None or isinstance(score, (int, float))
+        scores.append(score)
+
+    numeric = [s for s in scores if s is not None]
+    assert numeric == sorted(numeric, reverse=True), (
+        "rows must be sorted by relevance_score descending"
+    )
+    assert all(s is None for s in scores[len(numeric):]), (
+        "unscored rows must sort last"
+    )
+
+
 @pytest.fixture
 def htigea_dress_url() -> str:
     return HTIGEA_DRESS_URL

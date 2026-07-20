@@ -8,9 +8,24 @@ Each analysis request gets its own SessionState instance.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime
 import uuid
+
+
+def relevance_sort_key(score: Optional[float]) -> Tuple[int, float]:
+    """
+    Ascending sort key that orders by relevance, best first, unscored last.
+
+    Shared by every place that ranks on relevance so the None handling has one
+    definition. Unscored (None) sorts after every scored row *including* a
+    scored 0.0 — a 0.0 is a measured irrelevance, whereas None means the
+    pipeline never ranked that row at all, and a measured result outranks an
+    absent one. Use directly as `key=`; no `reverse=True`.
+    """
+    if score is None:
+        return (1, 0.0)
+    return (0, -score)
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +73,10 @@ class BrowsePage:
     url: str
     keyword: str = ""
     position: int = 0
-    relevance_score: float = 0.0
+    # None = not yet scored by the evaluation agent. A real 0.0 is a valid
+    # measured score (the shelf is genuinely irrelevant) and must NOT be
+    # confused with "unscored", or the page would be re-evaluated forever.
+    relevance_score: Optional[float] = None
     checked: bool = False
     title: str = ""            # search-result title/breadcrumb metadata
     is_branded: bool = False   # inherently brand-specific shelf (classifier)
@@ -125,7 +143,9 @@ class ShelfResult:
     discoverability: bool = False    # product present on the brand-filtered shelf ("Digital Shelf (Brand Filter)")
     placement_rank: Optional[int] = None  # first base-shelf Page 1 product-card rank
     placements: List[ProductPlacement] = field(default_factory=list)
-    relevance_score: float = 0.0     # embedding relevance carried from the BrowsePage
+    # Embedding relevance carried from the BrowsePage. None when the page was
+    # checked before it was ever scored (see BrowsePage.relevance_score).
+    relevance_score: Optional[float] = None
     discovery_index: int = 0         # order this row was admitted (found+missing)
 
 
@@ -266,7 +286,13 @@ class SessionState:
 
     @property
     def unranked_pages(self) -> List[BrowsePage]:
-        return [p for p in self.pages_discovered if p.relevance_score == 0.0 and not p.checked]
+        """
+        Discovered pages the evaluation agent has not scored yet.
+
+        Keyed on `is None`, not `== 0.0`: a genuine 0.0 means "scored, and
+        irrelevant", and such a page must never re-enter the evaluate queue.
+        """
+        return [p for p in self.pages_discovered if p.relevance_score is None and not p.checked]
 
     @property
     def keywords_exhausted(self) -> bool:
@@ -340,7 +366,7 @@ class SessionState:
         ranked = sorted(
             self._unique_shelf_results(),
             key=lambda sr: (
-                -sr.relevance_score,
+                relevance_sort_key(sr.relevance_score),
                 sr.position if sr.position and sr.position > 0 else float("inf"),
                 sr.discovery_index,
                 self._normalize_result_url(sr.page_url),
@@ -408,6 +434,9 @@ class SessionState:
                 "keyword_type": sr.keyword_type,
                 "is_branded_shelf": sr.is_branded_shelf,
                 "position": sr.position,
+                # Embedding relevance this row was ranked on. null = never
+                # scored. Surfaced so the ordering above is inspectable.
+                "relevance_score": sr.relevance_score,
             })
 
         # Dashboard aggregates. The shared Discoverability Dashboard is driven by

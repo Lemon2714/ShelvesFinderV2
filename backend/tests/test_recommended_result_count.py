@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.agents.evaluation_agent import RELEVANCE_SCORE_KEY
 from app.agents.orchestrator import (
     _call_check_shelf,
     _check_stopping_conditions,
@@ -27,6 +28,7 @@ from app.models.session_state import (
     RECOMMENDED_RESULT_COUNT_MAX,
     RECOMMENDED_RESULT_COUNT_MIN,
 )
+from tests.conftest import assert_ranked_contract
 
 BROWSE = "https://www.walmart.com/browse/food/snacks"
 
@@ -383,10 +385,26 @@ class TestFullLoop:
                 return search_pages
 
             def fake_evaluate(product, pages):
+                """
+                Stand-in for evaluate_and_rank. Mirrors the real return
+                contract exactly — {url, keyword, position, title,
+                relevance_score}, every candidate present, sorted by score
+                descending — and self-checks against the same shared assertion
+                the real function is held to, so this double cannot drift away
+                from production again.
+                """
                 ranked = [
-                    {**p, "relevance_score": 0.9 - i * 0.05}
+                    {
+                        "url": p["url"],
+                        "keyword": p.get("keyword", ""),
+                        "position": p.get("position"),
+                        "title": p.get("title", ""),
+                        RELEVANCE_SCORE_KEY: round(0.9 - i * 0.05, 4),
+                    }
                     for i, p in enumerate(pages)
                 ]
+                ranked.sort(key=lambda r: -r[RELEVANCE_SCORE_KEY])
+                assert_ranked_contract(ranked, len(pages))
                 return ranked, 0.9, 0.0
 
             async def fake_check(pages, product_id, brand, known_brands=()):

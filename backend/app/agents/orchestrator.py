@@ -19,7 +19,7 @@ from typing import AsyncGenerator, Dict, Any
 from app.config import settings
 from app.models.session_state import (
     SessionState, AgentAction, BrowsePage, ShelfResult, ProductPlacement,
-    KEYWORD_LEVELS,
+    KEYWORD_LEVELS, relevance_sort_key,
 )
 from app.tools.tool_registry import registry, ToolResult
 from app.services.llm import call_llm, get_active_client
@@ -222,7 +222,7 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
 
 async def _call_evaluate(state: SessionState, args: dict) -> ToolResult:
     """Execute the evaluation (embedding ranking) tool."""
-    from app.agents.evaluation_agent import evaluate_and_rank
+    from app.agents.evaluation_agent import evaluate_and_rank, RELEVANCE_SCORE_KEY
 
     unranked = state.unranked_pages
     if not unranked:
@@ -236,31 +236,80 @@ async def _call_evaluate(state: SessionState, args: dict) -> ToolResult:
         "description": state.product.description,
         "features": state.product.features,
     }
-    raw_pages = [{"url": p.url, "keyword": p.keyword, "position": p.position} for p in unranked]
+    # `title` is the real search-result title captured at search time. Passing
+    # it lets the evaluator score the text a shopper actually sees instead of a
+    # title reconstructed from the URL slug.
+    raw_pages = [
+        {"url": p.url, "keyword": p.keyword, "position": p.position, "title": p.title}
+        for p in unranked
+    ]
 
     try:
         ranked, confidence, cost = await asyncio.to_thread(
             evaluate_and_rank, product_dict, raw_pages
         )
 
-        # Update relevance scores on BrowsePage objects
+        # The embedding calls were made whether or not the return shape is
+        # usable, so record the cost before any early return.
+        state.record_cost(cost)
+
+        # Update relevance scores on BrowsePage objects. Read the documented
+        # key with NO numeric default: substituting a placeholder here is what
+        # silently pinned every page to 0.5 and collapsed the final ranking
+        # onto raw search position.
         url_to_score: dict = {}
+        unscored_count = 0
         for rp in ranked:
-            if isinstance(rp, dict):
-                url_to_score[rp.get("url", "")] = rp.get("relevance_score", rp.get("score", 0.5))
+            if not isinstance(rp, dict):
+                continue
+            url = rp.get("url", "")
+            if not url:
+                continue
+            score = rp.get(RELEVANCE_SCORE_KEY)
+            if score is None:
+                unscored_count += 1
+                logger.warning(
+                    f"[Orchestrator] evaluate_and_rank returned no "
+                    f"'{RELEVANCE_SCORE_KEY}' for {url[:80]} — leaving the page "
+                    f"unscored rather than inventing a score"
+                )
+                continue
+            url_to_score[url] = score
+
+        if ranked and not url_to_score:
+            # Every row came back without a score: the evaluator is not
+            # honouring its contract. Report the tool as failed instead of
+            # leaving the pages unscored, which would make the agent re-pick
+            # 'evaluate' every round until the round limit.
+            logger.error(
+                f"[Orchestrator] evaluate_and_rank returned {len(ranked)} rows, "
+                f"none carrying '{RELEVANCE_SCORE_KEY}' — contract violation"
+            )
+            return ToolResult(
+                success=False,
+                error=f"evaluate_and_rank returned no '{RELEVANCE_SCORE_KEY}' values",
+                message="Evaluation returned no usable relevance scores",
+                cost_usd=cost,
+            )
 
         for page in state.pages_discovered:
             if page.url in url_to_score:
                 page.relevance_score = url_to_score[page.url]
 
-        # Sort discovered pages by relevance descending
-        state.pages_discovered.sort(key=lambda p: p.relevance_score, reverse=True)
+        # Sort discovered pages by relevance, best first, unscored last.
+        state.pages_discovered.sort(key=lambda p: relevance_sort_key(p.relevance_score))
 
-        state.record_cost(cost)
         return ToolResult(
             success=True,
-            data={"confidence": confidence, "ranked_count": len(ranked)},
-            message=f"Ranked {len(ranked)} pages (confidence={confidence:.1%})",
+            data={
+                "confidence": confidence,
+                "ranked_count": len(ranked),
+                "unscored_count": unscored_count,
+            },
+            message=(
+                f"Ranked {len(ranked)} pages (confidence={confidence:.1%})"
+                + (f", {unscored_count} unscored" if unscored_count else "")
+            ),
             cost_usd=cost,
         )
     except Exception as e:
@@ -283,11 +332,10 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
         requested = default_batch
     max_pages = max(1, min(requested, 10))
 
-    # Pick top-ranked unchecked pages
+    # Pick top-ranked unchecked pages — best relevance first, unscored last.
     candidates = sorted(
         state.unchecked_pages,
-        key=lambda p: p.relevance_score,
-        reverse=True,
+        key=lambda p: relevance_sort_key(p.relevance_score),
     )[:max_pages]
 
     if not candidates:
