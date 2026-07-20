@@ -312,8 +312,8 @@ document.addEventListener('DOMContentLoaded', () => {
         shelf_results: [
             { url: 'https://www.walmart.com/browse/electronics/headphones/3944_96469', keyword: 'wireless headphones', position: 1, product_found: true, found: true, brand_found: true, sponsored: true, organic: true, page_number: 1, visibility: true, discoverability: true, placement_rank: 2, placements: [{ placement_index: 1, placement_rank: 2, visibility: true, discoverability: false, sponsored: true, organic: false }, { placement_index: 2, placement_rank: 11, visibility: true, discoverability: true, sponsored: false, organic: true }] },
             { url: 'https://www.walmart.com/browse/electronics/bluetooth-headphones/3944_96469_1231', keyword: 'bluetooth headphones', position: 2, product_found: true, found: true, brand_found: true, sponsored: false, organic: true, page_number: 1, visibility: true, discoverability: true, placement_rank: 6, placements: [{ placement_index: 1, placement_rank: 6, visibility: true, discoverability: true, sponsored: false, organic: true }] },
-            { url: 'https://www.walmart.com/browse/electronics/over-ear-headphones/3944_96469_4561', keyword: 'over ear headphones', position: 3, product_found: true, found: true, brand_found: true, sponsored: true, organic: false, page_number: 2, visibility: true, discoverability: false, placement_rank: 4, placements: [{ placement_index: 1, placement_rank: 4, visibility: true, discoverability: false, sponsored: true, organic: false }] },
-            { url: 'https://www.walmart.com/browse/electronics/gaming-headsets/3944_96469_7788', keyword: 'gaming headset', position: 4, product_found: false, found: false, brand_found: true, sponsored: false, organic: false, page_number: 0, visibility: false, discoverability: true },
+            { url: 'https://www.walmart.com/browse/electronics/over-ear-headphones/3944_96469_4561', keyword: 'over ear headphones', position: 3, product_found: false, found: false, brand_found: true, sponsored: true, organic: false, page_number: 0, visibility: true, discoverability: false, placement_rank: 4, placements: [{ placement_index: 1, placement_rank: 4, visibility: true, discoverability: false, sponsored: true, organic: false }] },
+            { url: 'https://www.walmart.com/browse/electronics/gaming-headsets/3944_96469_7788', keyword: 'gaming headset', position: 4, product_found: true, found: true, brand_found: true, sponsored: false, organic: false, page_number: 1, visibility: false, discoverability: true },
             { url: 'https://www.walmart.com/browse/electronics/noise-cancelling/3944_96469_9911', keyword: 'noise cancelling headphones', position: 5, product_found: false, found: false, brand_found: false, sponsored: false, organic: false, page_number: 0, visibility: false, discoverability: false },
         ],
         shelf_stats: { score: 60.0, found: 3, missing: 2, total: 5, visible: 3, discoverable: 3, placements: 4, organic: 2, sponsored: 2 },
@@ -829,7 +829,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 url: sr.url,
                 keyword: sr.keyword || '',
                 position: sr.position || 0,
-                found: sr.product_found ?? sr.found,
+                found: sr.discoverability ?? sr.product_found ?? sr.found,
                 brand_found: sr.brand_found ?? null,
                 // Per-shelf signals so the table columns reflect the right dashboard.
                 visibility: sr.visibility ?? sr.found,

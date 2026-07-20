@@ -102,3 +102,43 @@ async def test_orchestrator_does_not_make_placement_types_mutually_exclusive() -
     assert shelf_result.sponsored is True
     assert shelf_result.placement_rank == 3
     assert len(shelf_result.placements) == 2
+
+
+async def test_orchestrator_classifies_found_pages_from_page_one_discoverability() -> None:
+    url = "https://www.walmart.com/browse/example/1"
+    state = SessionState(target_missing_count=1)
+    state.product.product_id = "123"
+    state.product.brand = "Brand"
+    state.pages_discovered.append(BrowsePage(
+        url=url,
+        keyword="example",
+        relevance_score=1.0,
+    ))
+    stats = {
+        "found": 0,
+        "missing": 1,
+        "details": {
+            url: {
+                # Simulate the old contradiction: a deeper-page hit set
+                # product=True although the first page was not discoverable.
+                "product": True,
+                "brand": True,
+                "page": 2,
+                "visibility": True,
+                "discoverability": False,
+                "placements": [],
+            }
+        },
+    }
+
+    with patch(
+        "app.tools.shelf_checker.check_shelf_visibility",
+        new=AsyncMock(return_value=stats),
+    ):
+        result = await _call_check_shelf(state, {"max_pages": 1})
+
+    assert result.success is True
+    assert state.found_pages == []
+    assert len(state.missing_pages) == 1
+    assert state.missing_pages[0].product_found is False
+    assert state.missing_pages[0].page_number_found == 0

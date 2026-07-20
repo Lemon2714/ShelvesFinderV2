@@ -229,9 +229,11 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 )
                 continue
 
-            found = bool(result.get("product"))
+            # Use the page-1 brand-shelf signal shared with the final dashboard.
+            # Deeper shelf pages are never considered found.
+            found = bool(result.get("discoverability"))
             brand_found = result.get("brand")
-            page_found = result.get("page", 0) or 0
+            page_found = 1 if found else 0
             visibility = bool(result.get("visibility"))
             discoverability = bool(result.get("discoverability"))
             placements = [

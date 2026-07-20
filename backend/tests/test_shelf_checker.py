@@ -319,15 +319,14 @@ class TestFetchShelfSync:
         # shelf does not → visible but not discoverable → NOT organic.
         mock_settings.webscraping_api_key = ""
 
-        # Fetch order: brand page 1, (pagination pages 2..3), then the base shelf.
+        # Fetch order: brand page 1, then the base shelf.
         brand_page = MagicMock()
         brand_page.raise_for_status.return_value = None
         brand_page.text = "<html>Htigea brand dresses, other styles</html>"
         base_page = MagicMock()
         base_page.raise_for_status.return_value = None
         base_page.text = f"<html>sponsored {HTIGEA_PRODUCT_ID} appears here</html>"
-        # brand p1, brand p2, brand p3, base
-        mock_get.side_effect = [brand_page, brand_page, brand_page, base_page]
+        mock_get.side_effect = [brand_page, base_page]
 
         result = fetch_shelf_sync(
             "https://www.walmart.com/browse/clothing/dresses/1",
@@ -341,7 +340,9 @@ class TestFetchShelfSync:
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
-    def test_product_found_on_page_two(self, mock_get, mock_settings) -> None:
+    def test_product_beyond_page_one_is_not_checked_or_found(
+        self, mock_get, mock_settings
+    ) -> None:
         from unittest.mock import MagicMock
 
         mock_settings.webscraping_api_key = ""
@@ -349,14 +350,11 @@ class TestFetchShelfSync:
         page1 = MagicMock()
         page1.raise_for_status.return_value = None
         page1.text = "<html>Htigea dresses, other styles on page 1</html>"
-        page2 = MagicMock()
-        page2.raise_for_status.return_value = None
-        page2.text = f"<html>Htigea dresses including {HTIGEA_PRODUCT_ID}</html>"
         base = MagicMock()
         base.raise_for_status.return_value = None
         base.text = f"<html>base shelf with {HTIGEA_PRODUCT_ID}</html>"
-        # brand p1 (miss), brand p2 (hit → stop), then the base-shelf fetch
-        mock_get.side_effect = [page1, page2, base]
+        # Only brand page 1 and the base shelf are fetched.
+        mock_get.side_effect = [page1, base]
 
         result = fetch_shelf_sync(
             "https://www.walmart.com/browse/clothing/dresses/1",
@@ -364,15 +362,15 @@ class TestFetchShelfSync:
             "Htigea",
         )
 
-        # Legacy pagination still records page 2; discoverability is page-1 only.
-        assert result["product"] is True
-        assert result["page"] == 2
+        assert result["product"] is False
+        assert result["page"] == 0
         assert result["discoverability"] is False   # not on page 1 of brand shelf
         assert result["visibility"] is True          # present on the base shelf
         assert result["organic"] is False
-        # Second request should target page 2
+        assert mock_get.call_count == 2
+        # The second and final request is the base shelf, never page 2.
         second_url = mock_get.call_args_list[1][0][0]
-        assert "page=2" in second_url
+        assert "page=" not in second_url
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")

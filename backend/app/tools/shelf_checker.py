@@ -75,11 +75,6 @@ def _is_empty_results(html: str) -> bool:
     return any(marker in lower for marker in _EMPTY_RESULT_MARKERS)
 
 
-# How many paginated pages of a shelf to scan when looking for the product.
-# Higher = more accurate depth/placement data, but more requests per shelf.
-MAX_SHELF_PAGES = 3
-
-
 # ---------------------------------------------------------------------------
 # Single-page fetch
 # ---------------------------------------------------------------------------
@@ -122,21 +117,11 @@ def _fetch_html(shelf_url: str) -> str:
     return html
 
 
-def _with_page(shelf_url: str, page: int) -> str:
-    """Append a `page=N` query param to a shelf URL (page 1 = the bare URL)."""
-    if page <= 1:
-        return shelf_url
-    sep = "&" if "?" in shelf_url else "?"
-    return f"{shelf_url}{sep}page={page}"
-
-
 # ---------------------------------------------------------------------------
-# Shelf fetch — brand presence, product presence, and placement depth
+# Shelf fetch — page-1 brand presence, product presence, and placements
 # ---------------------------------------------------------------------------
 
-def fetch_shelf_sync(
-    url: str, product_id: str, brand: str, max_pages: int = MAX_SHELF_PAGES
-) -> Optional[dict]:
+def fetch_shelf_sync(url: str, product_id: str, brand: str) -> Optional[dict]:
     """
     Fetch a Walmart browse shelf and derive the three visibility signals for a
     product, fetching BOTH views of the shelf:
@@ -168,9 +153,9 @@ def fetch_shelf_sync(
                               "organic": bool, "sponsored": bool, ...}],
             # Legacy fields kept for the v2 orchestrator / email report:
             "brand":   bool|None,  # brand facet returns results on this shelf
-            "product": bool,       # product ID appears on the brand-filtered
-                                   # shelf (across paginated pages)
-            "page":    int,        # 1-based page the product was found on (0=none)
+            "product": bool,       # product ID appears on the first page of
+                                   # the brand-filtered shelf
+            "page":    int,        # 1 when found on page 1; otherwise 0
         }
         None  — the category page itself does not exist ("page couldn't be found").
                 Callers must exclude None results from all counts.
@@ -206,19 +191,10 @@ def fetch_shelf_sync(
         )
         discoverability = page1_present
 
-        # --- Legacy: page through the shelf to record *where* the product
-        # appears (feeds the v2 orchestrator's page-depth data). ---
+        # The agent and dashboard share the same definition: a product is found
+        # only when it appears on page 1 of the brand-filtered shelf.
         found_page = 1 if page1_present else 0
-        if not found_page and product_id and max_pages > 1 and not _is_empty_results(first_html):
-            for page_num in range(2, max_pages + 1):
-                page_html = _fetch_html(_with_page(shelf_url, page_num))
-                if not page_html or _is_strict_404(page_html) or _is_empty_results(page_html):
-                    break
-                if str(product_id) in page_html:
-                    found_page = page_num
-                    break
-
-        product_present = found_page > 0
+        product_present = page1_present
 
         # Visibility — raw presence on the base/general shelf (page 1). When no
         # brand is applied the shelf we already fetched *is* the base shelf.

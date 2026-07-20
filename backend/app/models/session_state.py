@@ -108,7 +108,7 @@ class ShelfResult:
     """Result of checking whether a product appears on a specific shelf/page."""
     page_url: str
     product_found: bool
-    page_number_found: int = 0       # which paginated page the product was on
+    page_number_found: int = 0       # 1 when found on the first page; otherwise 0
     confidence: float = 0.0
     checked_at_round: int = 0
     keyword: str = ""                # search keyword that discovered this page
