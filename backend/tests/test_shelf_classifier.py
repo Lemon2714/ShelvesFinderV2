@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from app.tools.shelf_classifier import (
     classify_fetched_shelf,
     classify_shelf,
@@ -28,13 +30,45 @@ class TestGenericShelves:
         assert cls.is_branded is False
 
     def test_generic_title_containing_in_is_not_branded(self) -> None:
-        # "All in One Organizers" must not trip the "<Brand> in <Category>" rule.
+        # A title containing "in" is not evidence that a shelf is branded.
         cls = classify_shelf(
             "https://www.walmart.com/browse/home/storage/all-in-one-organizers/123",
             product_brand=BRAND,
             title="All in One Organizers - Walmart.com",
         )
         assert cls.is_branded is False
+
+    @pytest.mark.parametrize(
+        ("url", "title"),
+        [
+            (
+                "https://www.walmart.com/browse/beauty/shampoo/"
+                "1085666_3147628_5752434",
+                "Shampoo in Hair Care - Walmart.com",
+            ),
+            (
+                "https://www.walmart.com/browse/beauty/hair-styling-products/"
+                "1085666_3147628_7768896",
+                "Hair Styling Products in Hair Care - Walmart.com",
+            ),
+            (
+                "https://www.walmart.com/browse/premium-beauty/premium-hair-care/"
+                "7924299_8655252",
+                "Premium Hair Care in Premium Beauty",
+            ),
+            (
+                "https://www.walmart.com/browse/beauty/scalp-scrubs-treatments/"
+                "1085666_3147628_8428896_5309236",
+                "Scalp Scrubs & Treatments in Hair Treatments",
+            ),
+        ],
+    )
+    def test_category_title_pattern_is_not_rejected_pre_fetch(
+        self, url: str, title: str
+    ) -> None:
+        cls = classify_shelf(url, product_brand=BRAND, title=title)
+        assert cls.is_branded is False
+        assert cls.reason == ""
 
     def test_brand_substring_in_generic_slug_is_not_branded(self) -> None:
         # Exact-node match only: "dove" ≠ "dove-chocolate-gifts" category.
@@ -46,7 +80,7 @@ class TestGenericShelves:
 
 
 class TestAnalyzedBrandShelves:
-    def test_final_category_node_is_product_brand(self) -> None:
+    def test_product_brand_final_node_is_rejected_without_title(self) -> None:
         cls = classify_shelf(PRODUCT_BRAND_URL, product_brand=BRAND)
         assert cls.is_branded is True
         assert cls.reason == "brand_category_node"
@@ -71,19 +105,20 @@ class TestAnalyzedBrandShelves:
 
 
 class TestCompetitorBrandShelves:
-    def test_known_competitor_final_node(self) -> None:
+    def test_harvested_competitor_final_node_is_still_rejected(self) -> None:
         cls = classify_shelf(COMPETITOR_BARE_URL, product_brand=BRAND,
                              known_brands={"OGX"})
         assert cls.is_branded is True
+        assert cls.reason == "brand_category_node"
         assert cls.brand == "OGX"
 
-    def test_brand_in_category_title_pattern(self) -> None:
-        # Unknown competitor detected because the title leads with the same
-        # name as the URL's final category node ("OGX in Shampoo").
+    def test_brand_in_category_title_pattern_is_deferred_to_post_fetch(self) -> None:
+        # Title + URL alone cannot distinguish this unknown competitor from a
+        # generic category. Its page metadata is authoritative after fetch.
         cls = classify_shelf(COMPETITOR_BARE_URL, product_brand=BRAND,
                              title="OGX in Shampoo - Walmart.com")
-        assert cls.is_branded is True
-        assert cls.reason == "brand_in_category_title"
+        assert cls.is_branded is False
+        assert cls.reason == ""
 
 
 class TestBrandFacetUrls:

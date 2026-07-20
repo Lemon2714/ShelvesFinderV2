@@ -24,12 +24,13 @@ Detection signals, in order of strength:
      title/breadcrumb matching the analyzed product's brand.
   4. The final category node matching any known competitor brand harvested
      from search-result metadata during the session.
-  5. Walmart's brand-shelf title pattern "<Brand> in <Category>" when the
-     leading name also matches the URL's final category node.
 
 Pre-fetch classification (``classify_shelf``) works from search-result
 metadata alone, so a competitor-brand shelf whose URL slug and title carry no
-brand markers can slip past it. That gap is closed post-fetch by
+known brand markers can slip past it. In particular, Walmart uses the same
+``"<X> in <Y>"`` title pattern for generic category shelves and brand shelves,
+so that pattern is deliberately not treated as grounds for irreversible
+pre-fetch rejection. The gap is closed post-fetch by
 ``classify_fetched_shelf``, which reads the shelf page's own ``__NEXT_DATA__``
 payload — breadcrumbs, the page's brand facet list, pre-selected brand
 facets, and brand page-type markers — and by harvesting every brand name the
@@ -50,9 +51,6 @@ from typing import Iterable, Optional
 
 # Path segments that are Walmart result/rank identifiers, not category nodes.
 _ID_SEGMENT_RE = re.compile(r"^\d[\d_]*$")
-
-# "Head & Shoulders in Shampoo - Walmart.com" → brand-shelf title pattern.
-_BRAND_IN_CATEGORY_RE = re.compile(r"^(?P<brand>.+?)\s+in\s+.+$", re.IGNORECASE)
 
 # Trailing site-name suffixes on search-result titles.
 _TITLE_SUFFIX_RE = re.compile(r"\s*[-–|]\s*walmart(\.com)?\s*$", re.IGNORECASE)
@@ -189,17 +187,6 @@ def classify_shelf(
         return ShelfClassification(
             True, "brand_breadcrumb_node", brand_keys[breadcrumb_node_key]
         )
-
-    # 5. Walmart brand-shelf title pattern "<Brand> in <Category>", accepted
-    #    only when the leading name also matches the URL's final category node
-    #    (so generic titles containing "in" don't false-positive).
-    match = _BRAND_IN_CATEGORY_RE.match(_clean_title(title))
-    if match and final_key:
-        leading_key = _brand_key(match.group("brand"))
-        if leading_key and leading_key == final_key:
-            return ShelfClassification(
-                True, "brand_in_category_title", match.group("brand").strip()
-            )
 
     return ShelfClassification(False)
 

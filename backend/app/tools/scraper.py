@@ -142,6 +142,15 @@ def _slug_from_url(url: str) -> str:
     return ""
 
 
+def _decode_json_string_token(value: str) -> str:
+    """Decode a string value captured directly from raw JSON source."""
+    try:
+        decoded = json.loads(f'"{value}"')
+    except (json.JSONDecodeError, TypeError):
+        return value
+    return decoded if isinstance(decoded, str) else value
+
+
 def _extract_brand_fallback(html: str, soup: BeautifulSoup) -> str:
     """Try multiple fallback strategies to extract brand name."""
     # 1. og:brand meta
@@ -157,11 +166,11 @@ def _extract_brand_fallback(html: str, soup: BeautifulSoup) -> str:
     # 3. __NEXT_DATA__ regex
     m = re.search(r'"brand":\{"[^"]*":"([^"]+)"\}', html)
     if m:
-        return m.group(1)
+        return _decode_json_string_token(m.group(1))
 
     m = re.search(r'"brand":"([^"]+)"', html)
     if m:
-        return m.group(1)
+        return _decode_json_string_token(m.group(1))
 
     return ""
 
@@ -341,7 +350,7 @@ def fetch_product_content(url: str) -> dict:
     if not result["price"]:
         price_match = re.search(r'"priceString":"([^"]+)"', html_content)
         if price_match:
-            result["price"] = price_match.group(1)
+            result["price"] = _decode_json_string_token(price_match.group(1))
         else:
             price_match = re.search(r'"currentPrice":\{"price":([\d.]+)', html_content)
             if price_match:
