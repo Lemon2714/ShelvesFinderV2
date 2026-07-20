@@ -41,8 +41,8 @@ NARRATION = [
     "Target missing tells the agent to keep working until it finds this many shelves where your product is absent.",
     # 10 - budget
     "Budget sets a hard spending cap. The agent stops once it is reached.",
-    # 11 - branded keywords
-    "Enable branded keywords to also search terms that include your brand name, useful when your brand has strong shelf presence.",
+    # 11 - include branded shelves
+    "Enable Include Branded Shelves to add shelves discovered using searches that contain your brand name.",
     # 12 - agent context
     "Add optional context to steer the agent. For example, focus on pharmacy and wellness aisles for a supplement.",
     # 13 - live processing

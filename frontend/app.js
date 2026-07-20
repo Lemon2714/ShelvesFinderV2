@@ -439,7 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
             { element: '#v2MaxRounds', ...pop('Max rounds', 'The maximum number of search → evaluate → check cycles the agent may run before stopping.', 'right') },
             { element: '#v2TargetMissing', ...pop('Target missing', 'The agent keeps working until it finds this many shelves where your product is missing (or runs out of rounds/budget).', 'right') },
             { element: '#v2Budget', ...pop('Budget (USD)', 'A hard spend cap for AI + API calls. The agent stops once this limit is reached.', 'right') },
-            { element: '#v2IncludeBranded', ...pop('Branded keywords', 'When checked, the agent also searches keywords that include your brand name — useful when the brand has strong shelf presence.', 'right') },
+            { element: '#v2IncludeBranded', ...pop('Include branded shelves', 'When checked, the agent includes shelves discovered using searches that contain your brand name.', 'right') },
             { element: '#v2UserInstructions', ...pop('Agent context (optional)', 'Steer the agent toward the right shelves, e.g. "probiotic supplement — focus on pharmacy & wellness aisles."', 'top') },
             { element: '#v2AgentPanel', ...pop('7. Live processing', 'While running, this panel shows the agent\'s progress in real time — current round and running cost.'), onHighlightStarted: () => { tourRenderDemo(); } },
             { element: '#v2ReasoningLog', ...pop('Agent reasoning log', 'Every decision the agent makes — which tool it chose and why — streams here, so the process is fully transparent.') },
@@ -733,7 +733,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             let loopMsg = `🔁 Agent loop started — max ${data.config?.max_rounds} rounds, target ${data.config?.target_missing_count} missing pages`;
             if (data.config?.include_branded) {
-                loopMsg += ` · <span style="color:var(--accent-primary);font-weight:600;">branded keywords ON</span>`;
+                loopMsg += ` · <span style="color:var(--accent-primary);font-weight:600;">branded shelves ON</span>`;
             }
             if (data.config?.user_instructions) {
                 loopMsg += `<br><span style="opacity:0.75;font-style:italic;">📌 Context: ${data.config.user_instructions}</span>`;

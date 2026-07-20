@@ -228,15 +228,15 @@ def test_cases_data():
         {
             "id": "TC-V2-03",
             "category": "UI — Advance",
-            "name": "Branded keywords enabled",
+            "name": "Branded shelves enabled",
             "priority": "Medium",
             "where": "Browser UI",
             "mode": "Advance",
             "auto": "N/A",
             "input": broccoli,
-            "settings": "Branded Keywords = ON",
+            "settings": "Include Branded Shelves = ON",
             "preconditions": "Server + keys",
-            "steps": "1. Advance → Settings\n2. Check Branded Keywords\n3. Analyze broccoli URL\n4. Review keyword list in log/setup",
+            "steps": "1. Advance → Settings\n2. Check Include Branded Shelves\n3. Analyze broccoli URL\n4. Review keyword list in log/setup",
             "expected": "Keywords include brand terms (e.g. Simplot + product type) plus unbranded shelf terms",
         },
         {
