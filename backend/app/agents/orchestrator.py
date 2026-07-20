@@ -96,6 +96,7 @@ def _check_stopping_conditions(state: SessionState) -> tuple[bool, str]:
 async def _call_search(state: SessionState, args: dict) -> ToolResult:
     """Execute the search tool."""
     from app.agents.search_agent import find_browse_pages
+    from app.tools.shelf_classifier import classify_shelf, harvest_known_brands
 
     keywords: list[str] = args.get("keywords", [])
 
@@ -106,7 +107,15 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
 
         logger.info(f"[Search] Raw pages from search_agent ({len(raw_pages)}): {raw_pages[:2]}")
 
+        # Mine competitor brand names revealed by this batch's metadata
+        # (e.g. brand-facet URLs) before classifying any candidate, so a
+        # competitor's unfaceted sibling shelf is also recognized.
+        state.known_brand_terms.update(
+            harvest_known_brands(rp for rp in raw_pages if isinstance(rp, dict))
+        )
+
         new_pages: list[BrowsePage] = []
+        rejected_branded = 0
         existing_urls = {p.url for p in state.pages_discovered}
         for rp in raw_pages:
             url = rp.get("url") if isinstance(rp, dict) else str(rp)
@@ -114,7 +123,34 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
                 # Use `or` fallback — rp.get(key, default) won't use default when key exists with None value
                 kw = (rp.get("keyword") or (keywords[0] if keywords else "")) if isinstance(rp, dict) else ""
                 pos = int(rp.get("position") or 0) if isinstance(rp, dict) else 0
-                new_pages.append(BrowsePage(url=url, keyword=kw, position=pos))
+                title = (rp.get("title") or "") if isinstance(rp, dict) else ""
+
+                # Centralized branded-shelf gate: classify the discovered BASE
+                # shelf (before the display-only brand-filtered URL is built).
+                # A generic keyword can still surface a branded category page,
+                # so the shelf itself is classified, not just the keyword.
+                classification = classify_shelf(
+                    url,
+                    product_brand=state.product.brand,
+                    title=title,
+                    known_brands=state.known_brand_terms,
+                )
+                if classification.brand:
+                    state.known_brand_terms.add(classification.brand)
+                if classification.is_branded and not state.include_branded:
+                    rejected_branded += 1
+                    logger.info(
+                        f"[Search] Rejected branded shelf ({classification.reason}, "
+                        f"brand='{classification.brand}'): {url[:80]}"
+                    )
+                    existing_urls.add(url)
+                    continue
+
+                new_pages.append(BrowsePage(
+                    url=url, keyword=kw, position=pos, title=title,
+                    is_branded=classification.is_branded,
+                    keyword_type=state.keyword_type_for(kw),
+                ))
                 logger.info(f"[Search] BrowsePage created: keyword='{kw}' position={pos} url={url[:60]}")
                 existing_urls.add(url)
 
@@ -129,8 +165,15 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
 
         return ToolResult(
             success=True,
-            data={"new_pages": len(new_pages), "total_discovered": len(state.pages_discovered)},
-            message=f"Searched {len(keywords)} keywords, discovered {len(new_pages)} new pages",
+            data={
+                "new_pages": len(new_pages),
+                "total_discovered": len(state.pages_discovered),
+                "rejected_branded": rejected_branded,
+            },
+            message=(
+                f"Searched {len(keywords)} keywords, discovered {len(new_pages)} new pages"
+                + (f", rejected {rejected_branded} branded shelves" if rejected_branded else "")
+            ),
         )
     except Exception as e:
         logger.error(f"[Orchestrator] Search failed: {e}", exc_info=True)
@@ -207,11 +250,15 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
 
     try:
         stats = await check_shelf_visibility(
-            raw_pages, state.product.product_id, state.product.brand
+            raw_pages, state.product.product_id, state.product.brand,
+            known_brands=state.known_brand_terms,
         )
 
-        details:       dict = stats.get("details", {})
-        invalid_count: int  = 0
+        details:          dict = stats.get("details", {})
+        invalid_count:    int  = 0
+        rejected_branded: int  = 0
+        found_count:      int  = 0
+        missing_count:    int  = 0
 
         logger.info(f"[ShelfCheck] details keys: {list(details.keys())[:3]}")
         for page in candidates:
@@ -228,6 +275,28 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                     f"{page.url[:80]}"
                 )
                 continue
+
+            # Harvest every brand the fetched page's own facet metadata
+            # revealed, so later candidates are rejected before being fetched.
+            state.known_brand_terms.update(
+                b for b in (result.get("page_brands") or []) if b
+            )
+            if result.get("shelf_brand"):
+                state.known_brand_terms.add(result["shelf_brand"])
+
+            # Post-fetch verification: the page's own __NEXT_DATA__ proved the
+            # base shelf is inherently branded (catches brands the pre-fetch
+            # lexical classifier couldn't know about).
+            if result.get("branded_shelf"):
+                page.is_branded = True
+                if not state.include_branded:
+                    rejected_branded += 1
+                    logger.info(
+                        f"[ShelfCheck] Rejected branded shelf post-fetch "
+                        f"({result.get('branded_reason')}, "
+                        f"brand='{result.get('shelf_brand')}'): {page.url[:80]}"
+                    )
+                    continue
 
             # Use the page-1 brand-shelf signal shared with the final dashboard.
             # Deeper shelf pages are never considered found.
@@ -261,6 +330,8 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
             sr = ShelfResult(
                 page_url=page.url,
                 product_found=found,
+                keyword_type=page.keyword_type,
+                is_branded_shelf=page.is_branded,
                 brand_found=brand_found,
                 page_number_found=page_found,
                 sponsored=sponsored,
@@ -275,22 +346,51 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 position=page.position,
             )
             if found:
+                found_count += 1
                 state.found_pages.append(sr)
             else:
+                missing_count += 1
                 state.missing_pages.append(sr)
+
+        # With the freshly harvested brand names, already-discovered but
+        # unchecked pages may now be recognizable as branded — drop them
+        # before they cost a fetch.
+        pruned_count = 0
+        if not state.include_branded and state.known_brand_terms:
+            from app.tools.shelf_classifier import classify_shelf
+
+            for pending_page in list(state.unchecked_pages):
+                classification = classify_shelf(
+                    pending_page.url,
+                    product_brand=state.product.brand,
+                    title=pending_page.title,
+                    known_brands=state.known_brand_terms,
+                )
+                if classification.is_branded:
+                    state.pages_discovered.remove(pending_page)
+                    pruned_count += 1
+                    logger.info(
+                        f"[ShelfCheck] Pruned unchecked branded shelf "
+                        f"({classification.reason}, brand='{classification.brand}'): "
+                        f"{pending_page.url[:80]}"
+                    )
 
         return ToolResult(
             success=True,
             data={
                 "checked": len(candidates),
-                "found":   stats.get("found", 0),
-                "missing": stats.get("missing", 0),
+                "found":   found_count,
+                "missing": missing_count,
                 "invalid": invalid_count,
+                "rejected_branded": rejected_branded,
+                "pruned_unchecked": pruned_count,
             },
             message=(
                 f"Checked {len(candidates)} pages: "
-                f"{stats.get('found', 0)} found, {stats.get('missing', 0)} missing"
+                f"{found_count} found, {missing_count} missing"
                 + (f", {invalid_count} invalid (skipped)" if invalid_count else "")
+                + (f", {rejected_branded} branded (rejected)" if rejected_branded else "")
+                + (f", {pruned_count} pending branded (pruned)" if pruned_count else "")
             ),
         )
     except Exception as e:

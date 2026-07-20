@@ -439,7 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
             { element: '#v2MaxRounds', ...pop('Max rounds', 'The maximum number of search → evaluate → check cycles the agent may run before stopping.', 'right') },
             { element: '#v2TargetMissing', ...pop('Target missing', 'The agent keeps working until it finds this many shelves where your product is missing (or runs out of rounds/budget).', 'right') },
             { element: '#v2Budget', ...pop('Budget (USD)', 'A hard spend cap for AI + API calls. The agent stops once this limit is reached.', 'right') },
-            { element: '#v2IncludeBranded', ...pop('Include branded shelves', 'When checked, the agent includes shelves discovered using searches that contain your brand name.', 'right') },
+            { element: '#v2IncludeBranded', ...pop('Include branded results', 'Off: only generic category shelves are recommended — brand-specific shelves (yours or competitors\') are excluded, but each generic shelf still gets a brand-filtered link for your product\'s brand. On: brand-name keywords are searched too and inherently branded shelves are allowed.', 'right') },
             { element: '#v2UserInstructions', ...pop('Agent context (optional)', 'Steer the agent toward the right shelves, e.g. "probiotic supplement — focus on pharmacy & wellness aisles."', 'top') },
             { element: '#v2AgentPanel', ...pop('7. Live processing', 'While running, this panel shows the agent\'s progress in real time — current round and running cost.'), onHighlightStarted: () => { tourRenderDemo(); } },
             { element: '#v2ReasoningLog', ...pop('Agent reasoning log', 'Every decision the agent makes — which tool it chose and why — streams here, so the process is fully transparent.') },
@@ -733,7 +733,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             let loopMsg = `🔁 Agent loop started — max ${data.config?.max_rounds} rounds, target ${data.config?.target_missing_count} missing pages`;
             if (data.config?.include_branded) {
-                loopMsg += ` · <span style="color:var(--accent-primary);font-weight:600;">branded shelves ON</span>`;
+                loopMsg += ` · <span style="color:var(--accent-primary);font-weight:600;">branded results ON</span>`;
             }
             if (data.config?.user_instructions) {
                 loopMsg += `<br><span style="opacity:0.75;font-style:italic;">📌 Context: ${data.config.user_instructions}</span>`;
@@ -823,9 +823,13 @@ document.addEventListener('DOMContentLoaded', () => {
             product_image: report.product_image || '',
             product_price: report.product_price || '',
             keywords: report.keywords_used || [],
-            unbranded_keywords: report.keywords_used || [],
-            branded_keywords: [],
-            browse_pages: (report.shelf_results || []).map(sr => ({
+            unbranded_keywords: report.unbranded_keywords_used || report.keywords_used || [],
+            branded_keywords: report.branded_keywords_used || [],
+            // Defensive check only — the backend already excludes inherently
+            // branded shelves from the report when include_branded is off.
+            browse_pages: (report.shelf_results || []).filter(sr =>
+                report.include_branded !== false || sr.is_branded_shelf !== true
+            ).map(sr => ({
                 url: sr.url,
                 keyword: sr.keyword || '',
                 position: sr.position || 0,
@@ -967,6 +971,13 @@ document.addEventListener('DOMContentLoaded', () => {
             const p = document.createElement('p'); p.className = 'formatted-label'; p.textContent = 'Generic Keywords'; keywordContainer.appendChild(p);
             const ul = document.createElement('ul'); ul.className = 'formatted-list clean-links';
             kws.forEach(kw => { const li = document.createElement('li'); li.innerHTML = `<a href="https://www.google.com/search?q=${encodeURIComponent(kw + ' walmart')}" target="_blank">${kw}</a>`; ul.appendChild(li); });
+            keywordContainer.appendChild(ul);
+        }
+        const brandedKws = data.branded_keywords || [];
+        if (brandedKws.length) {
+            const p = document.createElement('p'); p.className = 'formatted-label'; p.textContent = 'Branded Keywords'; keywordContainer.appendChild(p);
+            const ul = document.createElement('ul'); ul.className = 'formatted-list clean-links';
+            brandedKws.forEach(kw => { const li = document.createElement('li'); li.innerHTML = `<a href="https://www.google.com/search?q=${encodeURIComponent(kw + ' walmart')}" target="_blank">${kw}</a>`; ul.appendChild(li); });
             keywordContainer.appendChild(ul);
         }
 

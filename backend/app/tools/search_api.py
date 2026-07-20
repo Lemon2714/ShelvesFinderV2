@@ -60,12 +60,15 @@ def search_walmart_browse(keyword: str) -> List[dict]:
         for result in data.get("organic", []):
             link     = result.get("link", "")
             position = result.get("position", None)
+            title    = result.get("title", "") or ""
 
             if not link:
                 continue
 
             if _is_valid_walmart_browse_url(link):
-                results_data.append({"url": link, "position": position})
+                # Title is retained so downstream branded-shelf classification
+                # can inspect breadcrumb/brand metadata for this URL.
+                results_data.append({"url": link, "position": position, "title": title})
             else:
                 logger.warning(f"[SearchAPI] Rejected non-walmart.com URL: {link}")
 

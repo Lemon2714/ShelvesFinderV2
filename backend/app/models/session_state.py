@@ -60,6 +60,9 @@ class BrowsePage:
     position: int = 0
     relevance_score: float = 0.0
     checked: bool = False
+    title: str = ""            # search-result title/breadcrumb metadata
+    is_branded: bool = False   # inherently brand-specific shelf (classifier)
+    keyword_type: str = "generic"  # "generic" | "branded" — origin keyword class
 
 
 @dataclass
@@ -112,6 +115,8 @@ class ShelfResult:
     confidence: float = 0.0
     checked_at_round: int = 0
     keyword: str = ""                # search keyword that discovered this page
+    keyword_type: str = "generic"    # "generic" | "branded" — origin keyword class
+    is_branded_shelf: bool = False   # inherently brand-specific base shelf
     position: int = 0                # rank position in search results
     brand_found: Optional[bool] = None  # True/False if brand carried on shelf; None if not evaluated
     sponsored: bool = False          # True when any placement on this page is sponsored
@@ -184,6 +189,14 @@ class SessionState:
     keywords_tried: List[str] = field(default_factory=list)
     keywords_pending: List[str] = field(default_factory=list)
     keyword_expansion_level: int = 0          # 0=specific, 1=broader, 2=category, 3=department
+    # Classification of every generated keyword, kept separately so the
+    # include_branded setting stays enforceable and result provenance is known.
+    keywords_branded: List[str] = field(default_factory=list)
+    keywords_unbranded: List[str] = field(default_factory=list)
+    # Brand names harvested from search-result metadata during the session
+    # (e.g. competitor brands revealed by facet URLs). Used by the shelf
+    # classifier to reject competitor-branded shelves.
+    known_brand_terms: set = field(default_factory=set)
 
     # Pages
     pages_discovered: List[BrowsePage] = field(default_factory=list)
@@ -209,8 +222,12 @@ class SessionState:
     # Optional user-supplied context injected into agent prompts
     user_instructions: str = ""
 
-    # When True, keyword agent also generates brand-name keywords
-    # (e.g. "Ensure protein shake") in addition to unbranded shelf terms
+    # "Include Branded Results" setting. When True the keyword agent also
+    # generates and searches brand-name keywords (e.g. "Ensure protein shake")
+    # AND inherently brand-specific category shelves (analyzed brand or
+    # competitors) are allowed in the final results. When False only generic
+    # keywords are searched and only generic base shelves are admitted — the
+    # product-brand-filtered view of each generic shelf is still produced.
     include_branded: bool = False
 
     # Per-request LLM provider override ("openai" or "claude"); empty = use .env default
@@ -245,6 +262,22 @@ class SessionState:
     def record_cost(self, cost: float) -> None:
         self.total_openai_cost += cost
 
+    def keyword_type_for(self, keyword: str) -> str:
+        """Classify a keyword by the lists it was generated into."""
+        return "branded" if keyword in self.keywords_branded else "generic"
+
+    def _reportable_results(self, results: List[ShelfResult]) -> List[ShelfResult]:
+        """
+        Server-side enforcement of the "Include Branded Results" contract.
+
+        Inherently branded shelves are already rejected at discovery time when
+        include_branded is False; this is a defensive second gate so they can
+        never leak into the final report, persistence, email, or SSE output.
+        """
+        if self.include_branded:
+            return list(results)
+        return [sr for sr in results if not sr.is_branded_shelf]
+
     def to_summary_dict(self) -> dict:
         """Compact snapshot sent to LLM each iteration."""
         d = {
@@ -274,8 +307,11 @@ class SessionState:
 
     def to_final_report(self) -> dict:
         """Full structured output once the loop is done."""
+        reportable_found = self._reportable_results(self.found_pages)
+        reportable_missing = self._reportable_results(self.missing_pages)
+
         all_pages = []
-        for sr in self.found_pages:
+        for sr in reportable_found:
             all_pages.append({
                 "url": sr.page_url,
                 "found": True,
@@ -289,9 +325,11 @@ class SessionState:
                 "page_number": sr.page_number_found,
                 "confidence": sr.confidence,
                 "keyword": sr.keyword,
+                "keyword_type": sr.keyword_type,
+                "is_branded_shelf": sr.is_branded_shelf,
                 "position": sr.position,
             })
-        for sr in self.missing_pages:
+        for sr in reportable_missing:
             all_pages.append({
                 "url": sr.page_url,
                 "found": False,
@@ -305,12 +343,14 @@ class SessionState:
                 "page_number": 0,
                 "confidence": sr.confidence,
                 "keyword": sr.keyword,
+                "keyword_type": sr.keyword_type,
+                "is_branded_shelf": sr.is_branded_shelf,
                 "position": sr.position,
             })
 
         # Dashboard aggregates. The shared Discoverability Dashboard is driven by
         # Discoverability; visible/discoverable counts expose both signals.
-        all_results = self.found_pages + self.missing_pages
+        all_results = reportable_found + reportable_missing
         total_checked = len(all_results)
         visible_count = sum(1 for sr in all_results if sr.visibility)
         discoverable_count = sum(1 for sr in all_results if sr.discoverability)
@@ -326,6 +366,15 @@ class SessionState:
             "product_image": self.product.image,
             "product_price": self.product.price,
             "keywords_used": self.keywords_tried,
+            "branded_keywords_used": [
+                kw for kw in self.keywords_tried
+                if self.keyword_type_for(kw) == "branded"
+            ],
+            "unbranded_keywords_used": [
+                kw for kw in self.keywords_tried
+                if self.keyword_type_for(kw) == "generic"
+            ],
+            "include_branded": self.include_branded,
             "rounds_completed": self.round_number,
             "stop_reason": self.stop_reason,
             "shelf_results": all_pages,
@@ -347,7 +396,7 @@ class SessionState:
                 "organic_pages": sum(1 for sr in all_results if sr.organic),
                 "sponsored_pages": sum(1 for sr in all_results if sr.sponsored),
                 "details": {
-                    sr.page_url: True for sr in self.found_pages
+                    sr.page_url: True for sr in reportable_found
                 },
             },
             "openai_cost_usd": round(self.total_openai_cost, 6),

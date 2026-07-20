@@ -31,6 +31,17 @@ class TestFindBrowsePages:
         assert pages[0]["keyword"] == "party dresses"
 
     @patch("app.agents.search_agent.search_walmart_browse")
+    def test_retains_result_title_metadata(self, mock_search) -> None:
+        mock_search.return_value = [
+            {"url": "https://www.walmart.com/browse/beauty/shampoo/1",
+             "position": 1, "title": "Shampoo - Walmart.com"},
+        ]
+
+        pages = find_browse_pages(["shampoo"])
+
+        assert pages[0]["title"] == "Shampoo - Walmart.com"
+
+    @patch("app.agents.search_agent.search_walmart_browse")
     def test_drops_disallowed_host_after_search(self, mock_search) -> None:
         mock_search.return_value = [
             {"url": "https://business.walmart.com/browse/x", "position": 1},
