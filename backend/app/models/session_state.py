@@ -60,6 +60,9 @@ class BrowsePage:
     position: int = 0
     relevance_score: float = 0.0
     checked: bool = False
+    title: str = ""            # search-result title/breadcrumb metadata
+    is_branded: bool = False   # inherently brand-specific shelf (classifier)
+    keyword_type: str = "generic"  # "generic" | "branded" — origin keyword class
 
 
 @dataclass
@@ -112,6 +115,8 @@ class ShelfResult:
     confidence: float = 0.0
     checked_at_round: int = 0
     keyword: str = ""                # search keyword that discovered this page
+    keyword_type: str = "generic"    # "generic" | "branded" — origin keyword class
+    is_branded_shelf: bool = False   # inherently brand-specific base shelf
     position: int = 0                # rank position in search results
     brand_found: Optional[bool] = None  # True/False if brand carried on shelf; None if not evaluated
     sponsored: bool = False          # True when any placement on this page is sponsored
@@ -196,6 +201,14 @@ class SessionState:
     keywords_tried: List[str] = field(default_factory=list)
     keywords_pending: List[str] = field(default_factory=list)
     keyword_expansion_level: int = 0          # 0=specific, 1=broader, 2=category, 3=department
+    # Classification of every generated keyword, kept separately so the
+    # include_branded setting stays enforceable and result provenance is known.
+    keywords_branded: List[str] = field(default_factory=list)
+    keywords_unbranded: List[str] = field(default_factory=list)
+    # Brand names harvested from search-result metadata during the session
+    # (e.g. competitor brands revealed by facet URLs). Used by the shelf
+    # classifier to reject competitor-branded shelves.
+    known_brand_terms: set = field(default_factory=set)
 
     # Pages
     pages_discovered: List[BrowsePage] = field(default_factory=list)
@@ -225,8 +238,12 @@ class SessionState:
     # Optional user-supplied context injected into agent prompts
     user_instructions: str = ""
 
-    # When True, keyword agent also generates brand-name keywords
-    # (e.g. "Ensure protein shake") in addition to unbranded shelf terms
+    # "Include Branded Results" setting. When True the keyword agent also
+    # generates and searches brand-name keywords (e.g. "Ensure protein shake")
+    # AND inherently brand-specific category shelves (analyzed brand or
+    # competitors) are allowed in the final results. When False only generic
+    # keywords are searched and only generic base shelves are admitted — the
+    # product-brand-filtered view of each generic shelf is still produced.
     include_branded: bool = False
 
     # Per-request LLM provider override ("openai" or "claude"); empty = use .env default
@@ -261,6 +278,23 @@ class SessionState:
     def record_cost(self, cost: float) -> None:
         self.total_openai_cost += cost
 
+    def keyword_type_for(self, keyword: str) -> str:
+        """Classify a keyword by the lists it was generated into."""
+        return "branded" if keyword in self.keywords_branded else "generic"
+
+    def _reportable_results(self, results: List[ShelfResult]) -> List[ShelfResult]:
+        """
+        Server-side enforcement of the "Include Branded Results" contract.
+
+        Inherently branded shelves are already rejected at discovery time and
+        after the shelf check when include_branded is False; this is a
+        defensive second gate so they can never leak into the final report,
+        persistence, email, or SSE output.
+        """
+        if self.include_branded:
+            return list(results)
+        return [sr for sr in results if not sr.is_branded_shelf]
+
     # ------------------------------------------------------------------
     # Final-row selection for "Recommended Category Pages"
     # ------------------------------------------------------------------
@@ -270,9 +304,15 @@ class SessionState:
         return (url or "").split("#")[0].rstrip("/").lower()
 
     def _unique_shelf_results(self) -> List[ShelfResult]:
-        """All eligible rows (found + missing), URL-deduplicated, in discovery order."""
+        """
+        All eligible rows (found + missing), URL-deduplicated, in discovery order.
+
+        Branded shelves are filtered out first when include_branded is False,
+        so they can neither consume a Recommended Category Pages slot nor
+        count toward the completion target.
+        """
         combined = sorted(
-            self.found_pages + self.missing_pages,
+            self._reportable_results(self.found_pages + self.missing_pages),
             key=lambda sr: sr.discovery_index,
         )
         seen: set = set()
@@ -343,9 +383,11 @@ class SessionState:
         """
         Full structured output once the loop is done.
 
-        Only the selected rows (capped at recommended_result_count, in
-        selection order) are reported; dashboards, persistence, copy, and
-        email all derive from this same collection.
+        Only the selected rows (branded shelves already excluded per the
+        "Include Branded Results" setting, then capped at
+        recommended_result_count, in selection order) are reported;
+        dashboards, persistence, copy, and email all derive from this same
+        collection.
         """
         selected = self.selected_shelf_results()
         all_pages = []
@@ -363,6 +405,8 @@ class SessionState:
                 "page_number": sr.page_number_found,
                 "confidence": sr.confidence,
                 "keyword": sr.keyword,
+                "keyword_type": sr.keyword_type,
+                "is_branded_shelf": sr.is_branded_shelf,
                 "position": sr.position,
             })
 
@@ -384,6 +428,15 @@ class SessionState:
             "product_image": self.product.image,
             "product_price": self.product.price,
             "keywords_used": self.keywords_tried,
+            "branded_keywords_used": [
+                kw for kw in self.keywords_tried
+                if self.keyword_type_for(kw) == "branded"
+            ],
+            "unbranded_keywords_used": [
+                kw for kw in self.keywords_tried
+                if self.keyword_type_for(kw) == "generic"
+            ],
+            "include_branded": self.include_branded,
             "rounds_completed": self.round_number,
             "stop_reason": self.stop_reason,
             "recommended_result_count_requested": self.recommended_result_count,

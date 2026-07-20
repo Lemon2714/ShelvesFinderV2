@@ -196,7 +196,8 @@ async def run_v2_workflow(
         loop_start_config["user_instructions"] = state.user_instructions
         logger.info(f"[WorkflowV2] User instructions active: {state.user_instructions[:100]}")
     if state.include_branded:
-        logger.info("[WorkflowV2] Branded keywords enabled")
+        logger.info("[WorkflowV2] Include Branded Results enabled — branded keywords "
+                    "and inherently branded shelves are allowed")
 
     yield {
         "event": "loop_start",
@@ -236,8 +237,12 @@ async def _persist_results(state: SessionState) -> None:
             save_result_to_csv, append_result_to_sheet, upload_csv_to_drive
         )
 
+        # The final report already enforces the "Include Branded Results"
+        # contract, so persisted pages inherit the same filtering.
         report = state.to_final_report()
         browse_pages_urls = [sr["url"] for sr in report["shelf_results"]]
+        branded_used = report.get("branded_keywords_used", [])
+        unbranded_used = report.get("unbranded_keywords_used", state.keywords_tried)
 
         if settings.use_google_sheets:
             await asyncio.to_thread(
@@ -247,8 +252,8 @@ async def _persist_results(state: SessionState) -> None:
                 brand=state.product.brand,
                 product_id=state.product.product_id,
                 keywords=state.keywords_tried,
-                branded_keywords=[],
-                unbranded_keywords=state.keywords_tried,
+                branded_keywords=branded_used,
+                unbranded_keywords=unbranded_used,
                 browse_pages=browse_pages_urls,
                 openai_cost=state.total_openai_cost,
             )
@@ -261,8 +266,8 @@ async def _persist_results(state: SessionState) -> None:
                 brand=state.product.brand,
                 product_id=state.product.product_id,
                 keywords=state.keywords_tried,
-                branded_keywords=[],
-                unbranded_keywords=state.keywords_tried,
+                branded_keywords=branded_used,
+                unbranded_keywords=unbranded_used,
                 browse_pages=browse_pages_urls,
                 openai_cost=state.total_openai_cost,
             )

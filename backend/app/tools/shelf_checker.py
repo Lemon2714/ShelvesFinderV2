@@ -3,8 +3,9 @@ import asyncio
 import json
 import re
 import urllib.parse
-from typing import Optional
+from typing import Iterable, Optional
 from app.config import settings
+from app.tools.shelf_classifier import classify_fetched_shelf
 import requests
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,12 @@ def _fetch_html(shelf_url: str) -> str:
 # Shelf fetch — page-1 brand presence, product presence, and placements
 # ---------------------------------------------------------------------------
 
-def fetch_shelf_sync(url: str, product_id: str, brand: str) -> Optional[dict]:
+def fetch_shelf_sync(
+    url: str,
+    product_id: str,
+    brand: str,
+    known_brands: Iterable[str] = (),
+) -> Optional[dict]:
     """
     Fetch a Walmart browse shelf and derive the three visibility signals for a
     product, fetching BOTH views of the shelf:
@@ -151,6 +157,12 @@ def fetch_shelf_sync(url: str, product_id: str, brand: str) -> Optional[dict]:
             "placements": [{"placement_rank": int|None,
                               "visibility": bool, "discoverability": bool,
                               "organic": bool, "sponsored": bool, ...}],
+            # Post-fetch branded-shelf verification (from the BASE page's own
+            # __NEXT_DATA__ — breadcrumbs, brand facet list, page type):
+            "branded_shelf": bool,   # the base shelf is inherently branded
+            "branded_reason": str,   # which signal fired
+            "shelf_brand":  str,     # brand detected, when extractable
+            "page_brands":  [str],   # every brand the page's facet revealed
             # Legacy fields kept for the v2 orchestrator / email report:
             "brand":   bool|None,  # brand facet returns results on this shelf
             "product": bool,       # product ID appears on the first page of
@@ -234,6 +246,19 @@ def fetch_shelf_sync(url: str, product_id: str, brand: str) -> Optional[dict]:
         else:
             brand_present = not _is_empty_results(first_html)
 
+        # Post-fetch branded-shelf verification. Classify the BASE page only —
+        # never the brand-filtered view we constructed ourselves, whose facet
+        # is selected by design.
+        page_classification, page_brands = classify_fetched_shelf(
+            base_html, product_brand=brand, known_brands=known_brands
+        )
+        if page_classification.is_branded:
+            logger.info(
+                f"[ShelfChecker] Base shelf classified as branded "
+                f"({page_classification.reason}, brand='{page_classification.brand}'): "
+                f"{base_url[:80]}"
+            )
+
         return {
             "visibility":      visibility,
             "discoverability": discoverability,
@@ -241,6 +266,10 @@ def fetch_shelf_sync(url: str, product_id: str, brand: str) -> Optional[dict]:
             "sponsored":       sponsored,
             "placement_rank":  placement_rank,
             "placements":      placements,
+            "branded_shelf":   page_classification.is_branded,
+            "branded_reason":  page_classification.reason,
+            "shelf_brand":     page_classification.brand,
+            "page_brands":     sorted(page_brands),
             "brand":           brand_present,
             "product":         product_present,
             "page":            found_page,
@@ -252,6 +281,8 @@ def fetch_shelf_sync(url: str, product_id: str, brand: str) -> Optional[dict]:
             "visibility": False, "discoverability": False,
             "organic": False, "sponsored": False,
             "placement_rank": None, "placements": [],
+            "branded_shelf": False, "branded_reason": "",
+            "shelf_brand": "", "page_brands": [],
             "brand": None, "product": False, "page": 0,
         }
 
@@ -260,7 +291,12 @@ def fetch_shelf_sync(url: str, product_id: str, brand: str) -> Optional[dict]:
 # Async orchestration
 # ---------------------------------------------------------------------------
 
-async def check_shelf_visibility(pages: list, product_id: str, brand: str) -> dict:
+async def check_shelf_visibility(
+    pages: list,
+    product_id: str,
+    brand: str,
+    known_brands: Iterable[str] = (),
+) -> dict:
     """
     Check whether the product appears on each candidate shelf page.
 
@@ -300,9 +336,14 @@ async def check_shelf_visibility(pages: list, product_id: str, brand: str) -> di
 
     sem = asyncio.Semaphore(3)
 
+    # Snapshot the known-brand set once so concurrent fetches see a stable view.
+    known_brands_snapshot = tuple(known_brands or ())
+
     async def process_page(url: str):
         async with sem:
-            result = await asyncio.to_thread(fetch_shelf_sync, url, product_id, brand)
+            result = await asyncio.to_thread(
+                fetch_shelf_sync, url, product_id, brand, known_brands_snapshot
+            )
             return url, result
 
     tasks    = [process_page(item.get("url", "")) for item in pages if item.get("url")]

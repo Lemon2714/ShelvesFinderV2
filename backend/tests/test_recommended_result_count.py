@@ -337,7 +337,7 @@ class TestCheckShelfBatching:
 
         captured: dict = {}
 
-        async def fake_check(pages, product_id, brand):
+        async def fake_check(pages, product_id, brand, known_brands=()):
             captured["pages"] = pages
             return self._stats_for(pages)
 
@@ -355,7 +355,7 @@ class TestCheckShelfBatching:
                 BrowsePage(url=f"{BROWSE}/{i}", keyword="kw", relevance_score=0.5)
             )
 
-        async def fake_check(pages, product_id, brand):
+        async def fake_check(pages, product_id, brand, known_brands=()):
             stats = self._stats_for(pages)
             # First two pages don't exist on Walmart
             for p in pages[:2]:
@@ -389,7 +389,7 @@ class TestFullLoop:
                 ]
                 return ranked, 0.9, 0.0
 
-            async def fake_check(pages, product_id, brand):
+            async def fake_check(pages, product_id, brand, known_brands=()):
                 details = {}
                 for p in pages:
                     url = p["url"]
@@ -569,7 +569,7 @@ class TestNoopGuard:
             def cost_usd(self):
                 return 0.0
 
-        async def fake_check(pages, product_id, brand):
+        async def fake_check(pages, product_id, brand, known_brands=()):
             return {
                 "found": 0, "missing": len(pages),
                 "details": {

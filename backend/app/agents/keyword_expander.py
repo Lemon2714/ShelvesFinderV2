@@ -90,6 +90,9 @@ def expand_keywords(state: SessionState, llm_provider: str | None = None) -> Tup
         fallback = [" ".join(words[:i]) for i in range(2, min(4, len(words) + 1))]
         fallback = [kw for kw in fallback if kw not in state.keywords_tried][:3]
         state.keywords_pending.extend(fallback)
+        state.keywords_unbranded.extend(
+            kw for kw in fallback if kw not in state.keywords_unbranded
+        )
         logger.warning(f"[KeywordExpander] No LLM client; fallback keywords: {fallback}")
         return fallback, 0.0
 
@@ -125,6 +128,10 @@ def expand_keywords(state: SessionState, llm_provider: str | None = None) -> Tup
         logger.debug(f"[KeywordExpander] New keywords: {new_keywords}")
 
         state.keywords_pending.extend(new_keywords)
+        # Expansion keywords are generated brand-free by prompt design.
+        state.keywords_unbranded.extend(
+            kw for kw in new_keywords if kw not in state.keywords_unbranded
+        )
         state.record_cost(cost)
         return new_keywords, cost
 
@@ -147,19 +154,33 @@ def get_initial_keywords(state: SessionState, llm_provider: str | None = None) -
         "features":    state.product.features,
     }
 
-    all_kw, _, unbranded, cost = extract_keywords(
+    all_kw, branded, unbranded, cost = extract_keywords(
         product_dict,
         user_instructions=state.user_instructions,
         include_branded=state.include_branded,
         llm_provider=llm_provider,
     )
-    new_keywords = [kw for kw in (unbranded or all_kw) if kw]
+    unbranded_kws = [kw for kw in (unbranded or all_kw) if kw]
+    # Branded keywords are queued ONLY when the "Include Branded Results"
+    # setting is on; the classification is preserved on the session so the
+    # setting stays enforceable downstream and provenance can be reported.
+    branded_kws = [kw for kw in branded if kw] if state.include_branded else []
+    branded_kws = [kw for kw in branded_kws if kw not in unbranded_kws]
 
+    state.keywords_unbranded.extend(
+        kw for kw in unbranded_kws if kw not in state.keywords_unbranded
+    )
+    state.keywords_branded.extend(
+        kw for kw in branded_kws if kw not in state.keywords_branded
+    )
+
+    new_keywords = unbranded_kws + branded_kws
     state.keywords_pending.extend(new_keywords)
     state.record_cost(cost)
 
     logger.info(
         f"[KeywordExpander] Initial keywords ({len(new_keywords)}): "
+        f"{len(unbranded_kws)} generic + {len(branded_kws)} branded "
         f"{new_keywords} | cost=${cost:.6f}"
     )
     return new_keywords, cost

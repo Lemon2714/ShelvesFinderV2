@@ -33,8 +33,9 @@ def find_browse_pages(keywords: List[str]) -> List[dict]:
         results = search_walmart_browse(kw)
 
         for res in results:
-            url = res.get("url", "")
-            pos = res.get("position")
+            url   = res.get("url", "")
+            pos   = res.get("position")
+            title = res.get("title", "") or ""
 
             # Secondary domain guard
             if not _is_allowed_host(url):
@@ -42,15 +43,20 @@ def find_browse_pages(keywords: List[str]) -> List[dict]:
                 continue
 
             if url not in url_map:
-                url_map[url] = {"keyword": kw, "position": pos}
+                url_map[url] = {"keyword": kw, "position": pos, "title": title}
             else:
                 # Keep the best (lowest numbered) rank position
-                current_pos = url_map[url].get("position")
+                current = url_map[url]
+                current_pos = current.get("position")
                 if pos is not None and (current_pos is None or pos < current_pos):
-                    url_map[url] = {"keyword": kw, "position": pos}
+                    url_map[url] = {"keyword": kw, "position": pos,
+                                    "title": title or current.get("title", "")}
+                elif title and not current.get("title"):
+                    current["title"] = title
 
     pages = [
-        {"url": u, "keyword": v["keyword"], "position": v["position"]}
+        {"url": u, "keyword": v["keyword"], "position": v["position"],
+         "title": v.get("title", "")}
         for u, v in url_map.items()
     ]
     logger.info(f"[SearchAgent] {len(pages)} unique browse pages from {len(keywords)} keywords")
