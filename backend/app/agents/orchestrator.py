@@ -319,7 +319,7 @@ async def _call_evaluate(state: SessionState, args: dict) -> ToolResult:
 
 async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
     """Execute shelf visibility check on top unchecked pages."""
-    from app.tools.shelf_checker import check_shelf_visibility
+    from app.tools.shelf_checker import ShelfUnavailable, check_shelf_visibility
 
     # Default batch = rows still needed to reach the requested result count.
     # Hard cap of 10 matches RECOMMENDED_RESULT_COUNT_MAX so a user request
@@ -353,6 +353,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
 
         details:          dict = stats.get("details", {})
         invalid_count:    int  = 0
+        unavailable_count: int = 0
         rejected_branded: int  = 0
         found_count:      int  = 0
         missing_count:    int  = 0
@@ -370,6 +371,14 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 logger.warning(
                     f"[ShelfCheck] Skipping invalid page (not found on Walmart): "
                     f"{page.url[:80]}"
+                )
+                continue
+
+            if isinstance(result, ShelfUnavailable):
+                unavailable_count += 1
+                logger.warning(
+                    f"[ShelfCheck] Skipping unavailable page "
+                    f"({result.reason}): {page.url[:80]}"
                 )
                 continue
 
@@ -481,6 +490,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 "found":   found_count,
                 "missing": missing_count,
                 "invalid": invalid_count,
+                "unavailable": unavailable_count,
                 "rejected_branded": rejected_branded,
                 "pruned_unchecked": pruned_count,
             },
@@ -488,6 +498,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 f"Checked {len(candidates)} pages: "
                 f"{found_count} found, {missing_count} missing"
                 + (f", {invalid_count} invalid (skipped)" if invalid_count else "")
+                + (f", {unavailable_count} unavailable (skipped)" if unavailable_count else "")
                 + (f", {rejected_branded} branded (rejected)" if rejected_branded else "")
                 + (f", {pruned_count} pending branded (pruned)" if pruned_count else "")
             ),

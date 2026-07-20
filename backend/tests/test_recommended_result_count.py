@@ -28,6 +28,7 @@ from app.models.session_state import (
     RECOMMENDED_RESULT_COUNT_MAX,
     RECOMMENDED_RESULT_COUNT_MIN,
 )
+from app.tools.shelf_checker import ShelfUnavailable
 from tests.conftest import assert_ranked_contract
 
 BROWSE = "https://www.walmart.com/browse/food/snacks"
@@ -372,6 +373,37 @@ class TestCheckShelfBatching:
         assert state.eligible_result_count == 3
         should_stop, _ = _check_stopping_conditions(state)
         assert should_stop is False  # 3 of 5 → keep going
+
+
+    async def test_unavailable_page_does_not_count_toward_requested_rows(self):
+        state = _make_state(count=3)
+        url = f"{BROWSE}/unavailable"
+        state.pages_discovered.append(
+            BrowsePage(url=url, keyword="kw", relevance_score=0.9)
+        )
+
+        async def fake_check(pages, product_id, brand, known_brands=()):
+            return {
+                "found": 0,
+                "missing": 0,
+                "invalid": 0,
+                "unavailable": 1,
+                "details": {
+                    url: ShelfUnavailable(
+                        url=url, reason="direct response lacked product results"
+                    )
+                },
+            }
+
+        with patch("app.tools.shelf_checker.check_shelf_visibility", new=fake_check):
+            result = await _call_check_shelf(state, {"max_pages": 1})
+
+        assert result.success is True
+        assert result.data["unavailable"] == 1
+        assert state.eligible_result_count == 0
+        assert state.found_pages == []
+        assert state.missing_pages == []
+        assert state.to_final_report()["recommended_result_count_returned"] == 0
 
 
 class TestFullLoop:

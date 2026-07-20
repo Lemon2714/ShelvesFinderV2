@@ -2,13 +2,45 @@ import logging
 import asyncio
 import json
 import re
+import time
 import urllib.parse
-from typing import Iterable, Optional
+from dataclasses import dataclass
+from typing import Iterable, Optional, Union
 from app.config import settings
 from app.tools.shelf_classifier import classify_fetched_shelf
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    """Transport outcome for one HTML fetch; failure never masquerades as HTML."""
+
+    html: Optional[str]
+    path: str
+    status_code: Optional[int] = None
+    error: str = ""
+
+    @property
+    def loaded(self) -> bool:
+        return self.html is not None
+
+
+@dataclass(frozen=True)
+class ShelfUnavailable:
+    """A shelf whose existence or product absence could not be established."""
+
+    url: str
+    reason: str
+    fetch_path: str = ""
+    status_code: Optional[int] = None
+
+
+ShelfCheckResult = Union[dict, ShelfUnavailable, None]
+
+_API_MAX_ATTEMPTS = 2
+_API_RETRY_BACKOFF_SECONDS = 0.5
 
 # ---------------------------------------------------------------------------
 # Walmart "page not found" detection
@@ -80,42 +112,191 @@ def _is_empty_results(html: str) -> bool:
 # Single-page fetch
 # ---------------------------------------------------------------------------
 
-def _fetch_html(shelf_url: str) -> str:
-    """Fetch raw HTML for a shelf URL (WebScrapingAPI with direct fallback)."""
-    html = ""
-    try:
-        if settings.webscraping_api_key:
-            api_url = "https://api.webscrapingapi.com/v2"
-            params  = {
-                "api_key":   settings.webscraping_api_key,
-                "url":       shelf_url,
-                "render_js": "1",
-                "country":   "us",
-            }
-            api_headers = {
-                "Accept-Language":     "en-US,en;q=0.9",
-                "Wsa-Accept-Language": "en-US,en;q=0.9",
-            }
+def _log_fetch_observation(
+    shelf_url: str,
+    path: str,
+    status: Optional[int],
+    html: str,
+) -> None:
+    """Emit the evidence needed to distinguish served and degraded fetches."""
+    response_bytes = len(html.encode("utf-8")) if html else 0
+    logger.info(
+        "[ShelfChecker] Fetch observation path=%s status=%s bytes=%d "
+        "next_data=%s url=%s",
+        path,
+        status if status is not None else "none",
+        response_bytes,
+        "present" if '__NEXT_DATA__' in html else "absent",
+        shelf_url,
+    )
+
+
+def _has_next_data_marker(html: str) -> bool:
+    """Cheap pre-parse marker used to decide whether an HTTP 200 is promising."""
+    return bool(html and '__NEXT_DATA__' in html)
+
+
+def _api_error_is_retryable(exc: Exception) -> bool:
+    """Retry immediate provider/rate-limit failures, but not 60-second timeouts."""
+    if isinstance(exc, requests.Timeout):
+        return False
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status == 429 or (isinstance(status, int) and 500 <= status < 600)
+
+
+def _fetch_html(shelf_url: str) -> FetchResult:
+    """Fetch HTML without using an empty string as a failure sentinel."""
+    last_api_error = ""
+    if settings.webscraping_api_key:
+        api_url = "https://api.webscrapingapi.com/v2"
+        params = {
+            "api_key": settings.webscraping_api_key,
+            "url": shelf_url,
+            "render_js": "1",
+            "country": "us",
+        }
+        api_headers = {
+            "Accept-Language": "en-US,en;q=0.9",
+            "Wsa-Accept-Language": "en-US,en;q=0.9",
+        }
+        for attempt in range(1, _API_MAX_ATTEMPTS + 1):
             try:
-                response = requests.get(api_url, params=params, headers=api_headers, timeout=60)
+                response = requests.get(
+                    api_url,
+                    params=params,
+                    headers=api_headers,
+                    timeout=60,
+                )
                 response.raise_for_status()
                 html = response.text
+                if _has_next_data_marker(html) or _is_page_not_found(html):
+                    _log_fetch_observation(
+                        shelf_url, "api", response.status_code, html
+                    )
+                    return FetchResult(html, "api", response.status_code)
+                _log_fetch_observation(
+                    shelf_url, "api_unusable", response.status_code, html
+                )
+                logger.warning(
+                    "[ShelfChecker] WebScrapingAPI returned unstructured HTML "
+                    "for %s. Falling back.",
+                    shelf_url,
+                )
+                break
             except Exception as api_err:
-                logger.warning(f"[ShelfChecker] WebScrapingAPI failed ({api_err}). Falling back.")
+                last_api_error = str(api_err)
+                failure_response = getattr(api_err, "response", None)
+                failure_html = (
+                    getattr(failure_response, "text", "")
+                    if failure_response is not None
+                    else ""
+                )
+                _log_fetch_observation(
+                    shelf_url,
+                    "api_failure",
+                    getattr(failure_response, "status_code", None),
+                    failure_html,
+                )
+                if attempt < _API_MAX_ATTEMPTS and _api_error_is_retryable(api_err):
+                    delay = _API_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "[ShelfChecker] WebScrapingAPI attempt %d failed (%s). "
+                        "Retrying in %.1fs.",
+                        attempt,
+                        api_err,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning(
+                    "[ShelfChecker] WebScrapingAPI failed (%s). Falling back.",
+                    api_err,
+                )
+                break
 
-        if not html:
-            headers = {
-                "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                   "Chrome/122.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            response = requests.get(shelf_url, headers=headers, timeout=30)
-            response.raise_for_status()
-            html = response.text
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        response = requests.get(shelf_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        html = response.text
+        _log_fetch_observation(
+            shelf_url, "direct_fallback", response.status_code, html
+        )
+        return FetchResult(html, "direct_fallback", response.status_code)
     except Exception as fetch_err:
         logger.warning(f"[ShelfChecker] Fetch failed for {shelf_url}: {fetch_err}")
-    return html
+        failure_response = getattr(fetch_err, "response", None)
+        status_code = getattr(failure_response, "status_code", None)
+        _log_fetch_observation(
+            shelf_url, "total_failure", status_code, ""
+        )
+        error = str(fetch_err)
+        if last_api_error:
+            error = f"api={last_api_error}; direct={error}"
+        return FetchResult(None, "total_failure", status_code, error)
+
+
+def _coerce_fetch_result(value, shelf_url: str) -> FetchResult:
+    """Support patched string fixtures without restoring the empty sentinel."""
+    if isinstance(value, FetchResult):
+        return value
+    if isinstance(value, str):
+        if value:
+            return FetchResult(value, "mock", 200)
+        return FetchResult(None, "mock_failure", None, "empty HTML")
+    return FetchResult(
+        None,
+        "invalid_fetch_result",
+        None,
+        f"unexpected fetch result for {shelf_url}",
+    )
+
+
+def _has_structured_shelf_content(html: str) -> bool:
+    """True when __NEXT_DATA__ contains a recognizable product collection."""
+    match = _NEXT_DATA_RE.search(html or "")
+    if not match:
+        return False
+    try:
+        data = json.loads(match.group(1))
+    except Exception:
+        return False
+    if _find_ranked_result_items(data) is not None:
+        return True
+    return next(_iter_items(data), None) is not None
+
+
+def _view_has_positive_evidence(
+    html: str,
+    product_id: str,
+    occurrences: Optional[list[dict]],
+    *,
+    allow_explicit_empty: bool = False,
+) -> bool:
+    """A negative is trustworthy only when the view demonstrably loaded."""
+    if occurrences is not None or _has_structured_shelf_content(html):
+        return True
+    if product_id and str(product_id) in html:
+        return True
+    return allow_explicit_empty and _is_empty_results(html)
+
+
+def _unavailable_from_fetch(
+    fetch: FetchResult, url: str, reason: str
+) -> ShelfUnavailable:
+    detail = f"{reason}: {fetch.error}" if fetch.error else reason
+    return ShelfUnavailable(
+        url=url,
+        reason=detail,
+        fetch_path=fetch.path,
+        status_code=fetch.status_code,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +308,7 @@ def fetch_shelf_sync(
     product_id: str,
     brand: str,
     known_brands: Iterable[str] = (),
-) -> Optional[dict]:
+) -> ShelfCheckResult:
     """
     Fetch a Walmart browse shelf and derive the three visibility signals for a
     product, fetching BOTH views of the shelf:
@@ -171,6 +352,8 @@ def fetch_shelf_sync(
         }
         None  — the category page itself does not exist ("page couldn't be found").
                 Callers must exclude None results from all counts.
+        ShelfUnavailable means transport or structural validation failed;
+                callers must exclude it from both found and missing counts.
     """
     brand_applied = bool(brand)
     try:
@@ -182,7 +365,12 @@ def fetch_shelf_sync(
             shelf_url = url
 
         # --- Page 1 of the shelf we filter on (brand-filtered, or base when no brand) ---
-        first_html = _fetch_html(shelf_url)
+        first_fetch = _coerce_fetch_result(_fetch_html(shelf_url), shelf_url)
+        if not first_fetch.loaded:
+            return _unavailable_from_fetch(
+                first_fetch, shelf_url, "filtered view fetch failed"
+            )
+        first_html = first_fetch.html or ""
 
         # --- Guard: skip pages that don't exist ---
         # With a brand facet, an empty result means "brand absent" (a valid
@@ -196,6 +384,23 @@ def fetch_shelf_sync(
         # Discoverability — product on page 1 of the brand-filtered shelf. The
         # single fetched page is treated as page 1; we do not paginate for this.
         page1_occurrences = _extract_ranked_product_occurrences(first_html, product_id)
+        logger.info(
+            "[ShelfChecker] Parse observation view=filtered structured_results=%s "
+            "url=%s",
+            page1_occurrences is not None,
+            shelf_url,
+        )
+        if not _view_has_positive_evidence(
+            first_html,
+            product_id,
+            page1_occurrences,
+            allow_explicit_empty=brand_applied,
+        ):
+            return _unavailable_from_fetch(
+                first_fetch,
+                shelf_url,
+                "filtered view lacked structured product results",
+            )
         page1_present = (
             bool(page1_occurrences)
             if page1_occurrences is not None
@@ -211,10 +416,34 @@ def fetch_shelf_sync(
         # Visibility — raw presence on the base/general shelf (page 1). When no
         # brand is applied the shelf we already fetched *is* the base shelf.
         if brand_applied:
-            base_html = _fetch_html(base_url)
+            base_fetch = _coerce_fetch_result(_fetch_html(base_url), base_url)
+            if not base_fetch.loaded:
+                return _unavailable_from_fetch(
+                    base_fetch, base_url, "base view fetch failed"
+                )
+            base_html = base_fetch.html or ""
+            if _is_page_not_found(base_html):
+                logger.warning(
+                    f"[ShelfChecker] Base page not found (skipping): {base_url}"
+                )
+                return None
             base_occurrences = _extract_ranked_product_occurrences(
                 base_html, product_id
             )
+            logger.info(
+                "[ShelfChecker] Parse observation view=base structured_results=%s "
+                "url=%s",
+                base_occurrences is not None,
+                base_url,
+            )
+            if not _view_has_positive_evidence(
+                base_html, product_id, base_occurrences
+            ):
+                return _unavailable_from_fetch(
+                    base_fetch,
+                    base_url,
+                    "base view lacked structured product results",
+                )
             visibility = (
                 bool(base_occurrences)
                 if base_occurrences is not None
@@ -277,14 +506,7 @@ def fetch_shelf_sync(
 
     except Exception as e:
         logger.warning(f"[ShelfChecker] Unexpected error for {url}: {e}")
-        return {
-            "visibility": False, "discoverability": False,
-            "organic": False, "sponsored": False,
-            "placement_rank": None, "placements": [],
-            "branded_shelf": False, "branded_reason": "",
-            "shelf_brand": "", "page_brands": [],
-            "brand": None, "product": False, "page": 0,
-        }
+        return ShelfUnavailable(url=url, reason=f"unexpected error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +534,8 @@ async def check_shelf_visibility(
             "found":   int,   # shelves where the product is DISCOVERABLE
             "missing": int,   # shelves where the product is NOT discoverable
             "invalid": int,   # pages that no longer exist (excluded from score)
-            "total":   int,   # total keyword returns checked (invalid not counted)
+            "unavailable": int, # pages without enough evidence (excluded)
+            "total":   int,   # positively loaded pages checked
             "score":   float, # discoverable / total * 100
             # Per-signal aggregate counts:
             "visible":      int,  # shelves where the product is visible (base shelf)
@@ -328,7 +551,8 @@ async def check_shelf_visibility(
     """
     if not pages or not product_id:
         return {
-            "found": 0, "missing": 0, "invalid": 0, "total": 0, "score": 0.0,
+            "found": 0, "missing": 0, "invalid": 0, "unavailable": 0,
+            "total": 0, "score": 0.0,
             "visible": 0, "discoverable": 0, "placements": 0,
             "organic": 0, "sponsored": 0, "organic_pages": 0,
             "sponsored_pages": 0, "details": {},
@@ -358,11 +582,15 @@ async def check_shelf_visibility(
     organic_page_count: int = 0
     sponsored_page_count: int = 0
     invalid_count:     int  = 0
+    unavailable_count: int  = 0
 
     for url, result in outcomes:
         details[url] = result
         if result is None:
             invalid_count += 1
+            continue
+        if isinstance(result, ShelfUnavailable):
+            unavailable_count += 1
             continue
         if result.get("visibility"):
             visible_count += 1
@@ -377,7 +605,7 @@ async def check_shelf_visibility(
         if result.get("sponsored"):
             sponsored_page_count += 1
 
-    valid_total   = len(outcomes) - invalid_count   # pages that actually exist
+    valid_total   = len(outcomes) - invalid_count - unavailable_count
     found_count   = discoverable_count              # Discoverability-driven (Discoverability Dashboard)
     missing_count = valid_total - discoverable_count
     score         = (discoverable_count / valid_total * 100) if valid_total > 0 else 0.0
@@ -386,6 +614,7 @@ async def check_shelf_visibility(
         f"[ShelfChecker] Results — visible={visible_count} discoverable={discoverable_count} "
         f"placements={placement_count} organic={organic_count} sponsored={sponsored_count} "
         f"missing={missing_count} invalid={invalid_count} "
+        f"unavailable={unavailable_count} "
         f"total={valid_total} score={score:.1f}%"
     )
 
@@ -393,6 +622,7 @@ async def check_shelf_visibility(
         "found":        found_count,
         "missing":      missing_count,
         "invalid":      invalid_count,
+        "unavailable":  unavailable_count,
         "total":        valid_total,
         "score":        round(score, 1),
         "visible":      visible_count,
@@ -668,8 +898,8 @@ def fetch_search_placement_sync(keyword: str, product_id: str) -> dict:
         return {"organic": False, "sponsored": False}
     q = urllib.parse.quote_plus(keyword.strip())
     search_url = f"https://www.walmart.com/search?q={q}"
-    html = _fetch_html(search_url)
-    placement = analyze_placement(html, product_id)
+    fetch = _coerce_fetch_result(_fetch_html(search_url), search_url)
+    placement = analyze_placement(fetch.html or "", product_id)
     logger.info(
         f"[Placement] keyword='{keyword}' "
         f"sponsored={placement['sponsored']} organic={placement['organic']}"

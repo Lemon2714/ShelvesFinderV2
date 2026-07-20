@@ -4,6 +4,7 @@ End-to-end pipeline test for the Htigea dress product URL (mocked externals).
 Validates URL → ID/slug → keywords/search/evaluate/shelf flow without live APIs.
 """
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -62,7 +63,26 @@ class TestExamplePipelineMocked:
         )
         mock_shelf_settings.webscraping_api_key = ""
         mock_shelf_get.return_value.raise_for_status.return_value = None
-        mock_shelf_get.return_value.text = "<html>no product here</html>"
+        payload = json.dumps({
+            "props": {
+                "pageProps": {
+                    "initialData": {
+                        "searchResult": {
+                            "items": [
+                                {
+                                    "usItemId": "different-product",
+                                    "isSponsoredFlag": False,
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        })
+        mock_shelf_get.return_value.text = (
+            '<html><script id="__NEXT_DATA__" type="application/json">'
+            f"{payload}</script></html>"
+        )
 
         pages = find_browse_pages(["cocktail dresses", "womens dresses"])
         assert len(pages) == 1

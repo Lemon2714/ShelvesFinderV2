@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.tools.shelf_checker import (
+    FetchResult,
+    ShelfUnavailable,
     _is_page_not_found,
     analyze_placement,
     check_shelf_visibility,
@@ -234,7 +236,9 @@ class TestFetchShelfSync:
     def test_missing_everywhere_no_brand(self, mock_get, mock_settings) -> None:
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
-        mock_get.return_value.text = "<html>other products only</html>"
+        mock_get.return_value.text = _ranked_next_data_html([
+            {"usItemId": "other", "isSponsoredFlag": False},
+        ])
 
         # No brand supplied → brand filter can't apply; discoverability == visibility.
         result = fetch_shelf_sync(
@@ -275,7 +279,9 @@ class TestFetchShelfSync:
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
         # Brand-filtered page has products (no empty markers) but not our ID
-        mock_get.return_value.text = "<html>Htigea brand dresses, other styles</html>"
+        mock_get.return_value.text = _ranked_next_data_html([
+            {"usItemId": "other", "isSponsoredFlag": False},
+        ])
 
         result = fetch_shelf_sync(
             "https://www.walmart.com/browse/clothing/dresses/1",
@@ -296,7 +302,15 @@ class TestFetchShelfSync:
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
         # Brand facet returns zero items → brand not carried on this shelf
-        mock_get.return_value.text = '<html>0 results for this filter</html>'
+        filtered_page = MagicMock()
+        filtered_page.raise_for_status.return_value = None
+        filtered_page.text = _ranked_next_data_html([]) + "0 results for this filter"
+        base_page = MagicMock()
+        base_page.raise_for_status.return_value = None
+        base_page.text = _ranked_next_data_html([
+            {"usItemId": "other", "isSponsoredFlag": False},
+        ])
+        mock_get.side_effect = [filtered_page, base_page]
 
         result = fetch_shelf_sync(
             "https://www.walmart.com/browse/clothing/dresses/1",
@@ -322,10 +336,14 @@ class TestFetchShelfSync:
         # Fetch order: brand page 1, then the base shelf.
         brand_page = MagicMock()
         brand_page.raise_for_status.return_value = None
-        brand_page.text = "<html>Htigea brand dresses, other styles</html>"
+        brand_page.text = _ranked_next_data_html([
+            {"usItemId": "other", "isSponsoredFlag": False},
+        ])
         base_page = MagicMock()
         base_page.raise_for_status.return_value = None
-        base_page.text = f"<html>sponsored {HTIGEA_PRODUCT_ID} appears here</html>"
+        base_page.text = _ranked_next_data_html([
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": True},
+        ])
         mock_get.side_effect = [brand_page, base_page]
 
         result = fetch_shelf_sync(
@@ -349,10 +367,14 @@ class TestFetchShelfSync:
 
         page1 = MagicMock()
         page1.raise_for_status.return_value = None
-        page1.text = "<html>Htigea dresses, other styles on page 1</html>"
+        page1.text = _ranked_next_data_html([
+            {"usItemId": "other", "isSponsoredFlag": False},
+        ])
         base = MagicMock()
         base.raise_for_status.return_value = None
-        base.text = f"<html>base shelf with {HTIGEA_PRODUCT_ID}</html>"
+        base.text = _ranked_next_data_html([
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+        ])
         # Only brand page 1 and the base shelf are fetched.
         mock_get.side_effect = [page1, base]
 
@@ -395,7 +417,8 @@ class TestCheckShelfVisibility:
         pages = [{"url": "https://www.walmart.com/browse/a/1"}]
         stats = await check_shelf_visibility(pages, "", "Brand")
         assert stats == {
-            "found": 0, "missing": 0, "invalid": 0, "total": 0, "score": 0.0,
+            "found": 0, "missing": 0, "invalid": 0, "unavailable": 0,
+            "total": 0, "score": 0.0,
             "visible": 0, "discoverable": 0, "placements": 0,
             "organic": 0, "sponsored": 0, "organic_pages": 0,
             "sponsored_pages": 0, "details": {},
@@ -462,3 +485,102 @@ class TestCheckShelfVisibility:
         # details carries the per-shelf signal dicts (and the None for invalid).
         assert stats["details"]["https://www.walmart.com/browse/a/1"]["organic"] is True
         assert stats["details"]["https://www.walmart.com/browse/d/4"] is None
+
+
+class TestNegativeEvidenceGuard:
+    """A shelf can be missing only after a positive page-load signal."""
+
+    async def test_total_fetch_failure_is_not_reported_missing(self) -> None:
+        url = "https://www.walmart.com/browse/beauty/shampoo/1"
+        with patch("app.tools.shelf_checker._fetch_html", return_value=""):
+            stats = await check_shelf_visibility(
+                [{"url": url}], HTIGEA_PRODUCT_ID, ""
+            )
+
+        assert stats["missing"] == 0
+        assert stats["total"] == 0
+        assert stats["invalid"] == 0
+        assert stats["unavailable"] == 1
+        assert isinstance(stats["details"][url], ShelfUnavailable)
+
+    async def test_http_200_bot_page_is_not_reported_missing(self) -> None:
+        url = "https://www.walmart.com/browse/beauty/shampoo/2"
+        bot_html = (
+            "<html><head><title>Robot or human?</title></head>"
+            "<body>Press and hold to confirm you are a human</body></html>"
+        )
+        fetch = FetchResult(bot_html, "direct_fallback", 200)
+        with patch("app.tools.shelf_checker._fetch_html", return_value=fetch):
+            stats = await check_shelf_visibility(
+                [{"url": url}], HTIGEA_PRODUCT_ID, ""
+            )
+
+        assert stats["missing"] == 0
+        assert stats["total"] == 0
+        assert stats["invalid"] == 0
+        assert stats["unavailable"] == 1
+
+    async def test_absent_from_loaded_shelf_is_still_missing(self) -> None:
+        url = "https://www.walmart.com/browse/beauty/shampoo/3"
+        loaded_html = _ranked_next_data_html([
+            {"usItemId": "different-product", "isSponsoredFlag": False},
+        ])
+        with patch("app.tools.shelf_checker._fetch_html", return_value=loaded_html):
+            stats = await check_shelf_visibility(
+                [{"url": url}], HTIGEA_PRODUCT_ID, ""
+            )
+
+        assert stats["missing"] == 1
+        assert stats["total"] == 1
+        assert stats["invalid"] == 0
+        assert stats["unavailable"] == 0
+        assert stats["details"][url]["visibility"] is False
+
+    async def test_confirmed_404_remains_invalid_not_unavailable(self) -> None:
+        url = "https://www.walmart.com/browse/beauty/shampoo/deleted"
+        with patch(
+            "app.tools.shelf_checker._fetch_html",
+            return_value="<html>This page couldn't be found</html>",
+        ):
+            stats = await check_shelf_visibility(
+                [{"url": url}], HTIGEA_PRODUCT_ID, ""
+            )
+
+        assert stats["missing"] == 0
+        assert stats["total"] == 0
+        assert stats["invalid"] == 1
+        assert stats["unavailable"] == 0
+
+    @patch("app.tools.shelf_checker.time.sleep")
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_webscraping_api_retries_502_with_backoff(
+        self, mock_get, mock_settings, mock_sleep
+    ) -> None:
+        import requests
+
+        mock_settings.webscraping_api_key = "test-key"
+        failed = MagicMock()
+        failed.status_code = 502
+        failed.text = "Bad Gateway"
+        failed.raise_for_status.side_effect = requests.HTTPError(
+            "502 Bad Gateway", response=failed
+        )
+        loaded = MagicMock()
+        loaded.status_code = 200
+        loaded.text = _ranked_next_data_html([
+            {"usItemId": "different-product", "isSponsoredFlag": False},
+        ])
+        loaded.raise_for_status.return_value = None
+        mock_get.side_effect = [failed, loaded]
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/beauty/shampoo/4",
+            HTIGEA_PRODUCT_ID,
+            "",
+        )
+
+        assert isinstance(result, dict)
+        assert result["visibility"] is False
+        assert mock_get.call_count == 2
+        mock_sleep.assert_called_once_with(0.5)
