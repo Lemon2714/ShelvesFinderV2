@@ -18,7 +18,12 @@ import asyncio
 import logging
 from typing import AsyncGenerator
 
-from app.models.session_state import SessionState, ProductInfo
+from app.models.session_state import (
+    SessionState, ProductInfo,
+    RECOMMENDED_RESULT_COUNT_MIN,
+    RECOMMENDED_RESULT_COUNT_DEFAULT,
+    RECOMMENDED_RESULT_COUNT_MAX,
+)
 from app.agents.orchestrator import run_react_loop
 from app.agents.keyword_expander import get_initial_keywords
 
@@ -37,6 +42,7 @@ async def run_v2_workflow(
     user_instructions: str = "",
     include_branded: bool = False,
     llm_provider: str = "",
+    recommended_result_count: int = RECOMMENDED_RESULT_COUNT_DEFAULT,
 ) -> AsyncGenerator[dict, None]:
     """
     Full agentic analysis workflow for a Walmart product URL.
@@ -57,8 +63,30 @@ async def run_v2_workflow(
     """
 
     # ------------------------------------------------------------------
-    # 0. Create session state
+    # 0. Validate config + create session state
     # ------------------------------------------------------------------
+    # The HTTP endpoint already rejects invalid values (422); this guard
+    # protects non-HTTP callers. Only true integers in [3, 10] are accepted —
+    # bools, floats, and strings are rejected rather than coerced.
+    if (
+        not isinstance(recommended_result_count, int)
+        or isinstance(recommended_result_count, bool)
+        or not (
+            RECOMMENDED_RESULT_COUNT_MIN
+            <= recommended_result_count
+            <= RECOMMENDED_RESULT_COUNT_MAX
+        )
+    ):
+        yield {
+            "event": "error",
+            "message": (
+                f"Invalid recommended_result_count={recommended_result_count!r}: "
+                f"must be an integer from {RECOMMENDED_RESULT_COUNT_MIN} "
+                f"to {RECOMMENDED_RESULT_COUNT_MAX}"
+            ),
+        }
+        return
+
     state = SessionState(
         product_url=url,
         max_rounds=max_rounds,
@@ -67,6 +95,7 @@ async def run_v2_workflow(
         user_instructions=user_instructions.strip() if user_instructions else "",
         include_branded=include_branded,
         llm_provider=llm_provider.strip() if llm_provider else "",
+        recommended_result_count=recommended_result_count,
     )
     logger.info(f"[WorkflowV2] Session {state.session_id} started for {url}")
 
@@ -161,6 +190,7 @@ async def run_v2_workflow(
         "target_missing_count": state.target_missing_count,
         "budget_limit_usd": state.budget_limit,
         "include_branded": state.include_branded,
+        "recommended_result_count": state.recommended_result_count,
     }
     if state.user_instructions:
         loop_start_config["user_instructions"] = state.user_instructions
@@ -172,7 +202,10 @@ async def run_v2_workflow(
         "event": "loop_start",
         "session_id": state.session_id,
         "config": loop_start_config,
-        "message": "Entering ReAct agent loop...",
+        "message": (
+            f"Entering ReAct agent loop... "
+            f"Target: {state.recommended_result_count} recommended category pages"
+        ),
     }
 
     try:

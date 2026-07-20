@@ -97,15 +97,18 @@ TOOL_SCHEMAS: List[dict] = [
             "name": "check_shelf",
             "description": (
                 "Check whether the product appears on specific browse/category pages by scraping them. "
-                "Use this when there are ranked but unchecked pages. Checks up to 5 pages per call."
+                "Use this when there are ranked but unchecked pages. Checks up to 10 pages per call."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "max_pages": {
                         "type": "integer",
-                        "description": "Maximum number of pages to check in this call (1-5)",
-                        "default": 5,
+                        "description": (
+                            "Maximum number of pages to check in this call (1-10). "
+                            "When omitted, defaults to the number of rows still needed "
+                            "to reach the recommended result count."
+                        ),
                     },
                     "reasoning": {
                         "type": "string",
@@ -144,7 +147,7 @@ TOOL_SCHEMAS: List[dict] = [
             "name": "stop",
             "description": (
                 "Stop the agent loop and produce the final report. "
-                "Use when: (1) enough missing pages have been found, "
+                "Use when: (1) the requested number of category-page rows has been collected, "
                 "(2) all keyword levels exhausted, "
                 "(3) round limit reached, or "
                 "(4) budget limit approached."

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Request, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
@@ -242,14 +242,25 @@ async def save_analysis(request: SaveRequest, background_tasks: BackgroundTasks)
 # v2 Endpoints — ReAct agentic loop
 # ===========================================================================
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
+
+from app.models.session_state import (
+    RECOMMENDED_RESULT_COUNT_MIN,
+    RECOMMENDED_RESULT_COUNT_DEFAULT,
+    RECOMMENDED_RESULT_COUNT_MAX,
+)
 
 
 class V2ConfigRequest(BaseModel):
     max_rounds: int = 5
     target_missing_count: int = 3
     budget_limit: float = 0.50
+    recommended_result_count: int = Field(
+        default=RECOMMENDED_RESULT_COUNT_DEFAULT,
+        ge=RECOMMENDED_RESULT_COUNT_MIN,
+        le=RECOMMENDED_RESULT_COUNT_MAX,
+    )
 
 
 class V2AnalyzeRequest(BaseModel):
@@ -257,6 +268,11 @@ class V2AnalyzeRequest(BaseModel):
     max_rounds: Optional[int] = None
     target_missing_count: Optional[int] = None
     budget_limit: Optional[float] = None
+    recommended_result_count: Optional[int] = Field(
+        default=None,
+        ge=RECOMMENDED_RESULT_COUNT_MIN,
+        le=RECOMMENDED_RESULT_COUNT_MAX,
+    )
 
 
 @app.get("/v2/analyze/stream")
@@ -269,6 +285,15 @@ async def v2_analyze_stream(
     user_instructions: str = "",
     include_branded: bool = False,
     llm_provider: str = "",
+    recommended_result_count: int = Query(
+        default=RECOMMENDED_RESULT_COUNT_DEFAULT,
+        ge=RECOMMENDED_RESULT_COUNT_MIN,
+        le=RECOMMENDED_RESULT_COUNT_MAX,
+        description=(
+            "Number of final category-page rows to return under "
+            "'Recommended Category Pages' (integer, 3-10)"
+        ),
+    ),
 ):
     """
     Full agentic ReAct loop streamed via SSE.
@@ -279,6 +304,8 @@ async def v2_analyze_stream(
       target_missing_count — stop when N missing pages found (default 3)
       budget_limit         — max OpenAI spend in USD (default $0.50)
       user_instructions    — optional free-text context injected into agent prompts
+      recommended_result_count — final category-page rows to return (3-10, default 5);
+                                 invalid values are rejected with 422
 
     SSE event types:
       setup_start | setup_scraping | setup_keywords | loop_start
@@ -291,7 +318,8 @@ async def v2_analyze_stream(
     logger.info(
         f"[v2] Stream analyze: {url} "
         f"(max_rounds={max_rounds}, target_missing={target_missing_count}, "
-        f"budget=${budget_limit}, provider={llm_provider or 'default'})"
+        f"budget=${budget_limit}, result_count={recommended_result_count}, "
+        f"provider={llm_provider or 'default'})"
     )
     if user_instructions:
         logger.info(f"[v2] User instructions: {user_instructions[:100]}")
@@ -308,6 +336,7 @@ async def v2_analyze_stream(
                 user_instructions=user_instructions,
                 include_branded=include_branded,
                 llm_provider=llm_provider,
+                recommended_result_count=recommended_result_count,
             ):
                 if await request.is_disconnected():
                     logger.info("[v2] Client disconnected, stopping stream")

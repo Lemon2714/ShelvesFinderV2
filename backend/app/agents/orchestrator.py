@@ -28,17 +28,20 @@ logger = logging.getLogger(__name__)
 
 # System prompt: tells the LLM its role and decision criteria
 _SYSTEM_PROMPT = """You are the orchestrator for ShelvesFinder v2, an agentic AI system that finds
-which Walmart browse/category pages are MISSING a specific product.
+which Walmart browse/category pages a specific product should appear on.
 
-Your goal: Find browse pages where the product does NOT appear. Stop when you have found
-enough missing pages (target_missing) OR when search options are exhausted.
+Your goal: Assemble the requested number of final category-page rows
+(recommended_result_count) — valid, checked browse pages for the report. Keep
+searching, evaluating, and checking candidates until that many eligible rows
+have been collected OR search options are exhausted. Invalid or non-existent
+pages do not count toward the target.
 
 Decision rules:
 - If keywords_pending > 0: call 'search' with some or all pending keywords
 - If unranked pages exist after a search: call 'evaluate' to rank them by relevance
 - If ranked unchecked pages exist: call 'check_shelf' to verify product presence
-- If keywords_pending = 0 AND pages are checked AND target not met: call 'expand_keywords'
-- If target met OR all levels exhausted OR round/budget limit reached: call 'stop'
+- If keywords_pending = 0 AND pages are checked AND the row target is not met: call 'expand_keywords'
+- If the row target is met OR all levels exhausted OR round/budget limit reached: call 'stop'
 
 Always provide clear reasoning for your choice. Be efficient — prefer checking pages
 over searching more when you already have good candidates."""
@@ -57,9 +60,12 @@ def _build_state_message(state: SessionState) -> str:
         f"  - Expansion level: {summary['keyword_expansion_level']}\n\n"
         f"Pages:\n"
         f"  - Discovered: {summary['pages_discovered']}\n"
-        f"  - Unchecked: {summary['pages_unchecked']}\n\n"
+        f"  - Unranked (need 'evaluate'): {summary['pages_unranked']}\n"
+        f"  - Ranked & unchecked (ready for 'check_shelf'): {summary['pages_ranked_unchecked']}\n\n"
         f"Results so far:\n"
-        f"  - Missing pages found: {summary['missing_count']} (target: {summary['target_missing']})\n"
+        f"  - Eligible category-page rows ready: {summary['eligible_rows']} "
+        f"(target: {summary['recommended_result_count']})\n"
+        f"  - Missing pages found: {summary['missing_count']}\n"
         f"  - Found pages: {summary['found_count']}\n\n"
         f"Cost: ${summary['total_cost_usd']} / ${summary['budget_limit_usd']} budget\n\n"
         f"Recent actions:\n{summary['recent_actions']}\n"
@@ -73,13 +79,47 @@ def _build_state_message(state: SessionState) -> str:
     return msg
 
 
+def _returned_summary(final_report: dict) -> str:
+    """Human-readable 'Returned X of Y requested category pages' line."""
+    returned = final_report.get("recommended_result_count_returned", 0)
+    requested = final_report.get("recommended_result_count_requested", 0)
+    summary = f"Returned {returned} of {requested} requested category pages"
+    if returned < requested:
+        summary += " (shortfall — fewer valid pages were available)"
+    return summary
+
+
+def _is_noop_choice(state: SessionState, tool_name: str, tool_args: dict) -> bool:
+    """
+    True when the chosen tool cannot make progress in the current state.
+    Used to break LLM decision loops (e.g. calling 'evaluate' again after
+    every discovered page has already been ranked).
+    """
+    if tool_name == "evaluate":
+        return not state.unranked_pages
+    if tool_name == "check_shelf":
+        return not state.unchecked_pages
+    if tool_name == "search":
+        return not tool_args.get("keywords")
+    if tool_name == "expand_keywords":
+        return state.keywords_exhausted
+    return False
+
+
 def _check_stopping_conditions(state: SessionState) -> tuple[bool, str]:
     """
     Returns (should_stop, reason).
     Called after each Observe phase.
     """
-    if len(state.missing_pages) >= state.target_missing_count:
-        return True, f"goal_achieved: found {len(state.missing_pages)} missing pages (target={state.target_missing_count})"
+    # Primary completion target: the requested number of final category-page
+    # rows (valid, deduplicated, checked). Raw discovered/unchecked pages and
+    # the missing-page count alone never complete the run.
+    if state.eligible_result_count >= state.recommended_result_count:
+        return True, (
+            f"recommended_result_count_reached: collected "
+            f"{state.eligible_result_count} of {state.recommended_result_count} "
+            f"requested category pages"
+        )
 
     if state.round_number >= state.max_rounds:
         return True, f"round_limit: reached max_rounds={state.max_rounds}"
@@ -189,7 +229,16 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
     """Execute shelf visibility check on top unchecked pages."""
     from app.tools.shelf_checker import check_shelf_visibility
 
-    max_pages = min(int(args.get("max_pages", 5)), 5)
+    # Default batch = rows still needed to reach the requested result count.
+    # Hard cap of 10 matches RECOMMENDED_RESULT_COUNT_MAX so a user request
+    # for up to 10 final rows is always satisfiable.
+    remaining = max(1, state.recommended_result_count - state.eligible_result_count)
+    default_batch = min(remaining, 10)
+    try:
+        requested = int(args.get("max_pages", default_batch))
+    except (TypeError, ValueError):
+        requested = default_batch
+    max_pages = max(1, min(requested, 10))
 
     # Pick top-ranked unchecked pages
     candidates = sorted(
@@ -273,6 +322,8 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 checked_at_round=state.round_number,
                 keyword=page.keyword,
                 position=page.position,
+                relevance_score=page.relevance_score,
+                discovery_index=len(state.found_pages) + len(state.missing_pages),
             )
             if found:
                 state.found_pages.append(sr)
@@ -405,6 +456,22 @@ async def run_react_loop(state: SessionState) -> AsyncGenerator[dict, None]:
                 f"reason: {reasoning[:100]} | cost=${llm_cost:.6f}"
             )
 
+            # No-op guard: if the chosen tool has no work to do in the current
+            # state (e.g. 'evaluate' when every page is already ranked), the
+            # round would be wasted and the LLM tends to repeat the same choice
+            # forever. Override with the deterministic rule-based decision.
+            if _is_noop_choice(state, tool_name, tool_args):
+                fallback_name, fallback_args = _rule_based_decision(state)
+                logger.warning(
+                    f"[Orchestrator] '{tool_name}' has no work to do; "
+                    f"overriding with rule-based choice '{fallback_name}'"
+                )
+                reasoning = (
+                    f"[No-op override] '{tool_name}' had no work to do; "
+                    f"switched to '{fallback_name}'"
+                )
+                tool_name, tool_args = fallback_name, fallback_args
+
         logger.info(f"[Orchestrator] tool={tool_name} | reasoning={reasoning[:80]}")
 
         yield {
@@ -454,7 +521,12 @@ async def run_react_loop(state: SessionState) -> AsyncGenerator[dict, None]:
                 "event": "complete",
                 "round": state.round_number,
                 "stop_reason": state.stop_reason,
-                "message": f"Agent stopped: {state.stop_reason}",
+                "rows_returned": final_report["recommended_result_count_returned"],
+                "rows_requested": final_report["recommended_result_count_requested"],
+                "message": (
+                    f"Agent stopped: {state.stop_reason} · "
+                    + _returned_summary(final_report)
+                ),
                 "data": final_report,
             }
             return
@@ -469,9 +541,11 @@ async def run_react_loop(state: SessionState) -> AsyncGenerator[dict, None]:
             "round": state.round_number,
             "missing_found": len(state.missing_pages),
             "target": state.target_missing_count,
+            "rows_ready": state.eligible_result_count,
+            "rows_target": state.recommended_result_count,
             "should_stop": should_stop,
             "message": (
-                f"Goal check: {len(state.missing_pages)}/{state.target_missing_count} missing pages found"
+                f"Goal check: {state.eligible_result_count}/{state.recommended_result_count} category pages ready"
                 + (f" → STOPPING ({stop_reason})" if should_stop else " → continuing")
             ),
         }
@@ -481,11 +555,14 @@ async def run_react_loop(state: SessionState) -> AsyncGenerator[dict, None]:
             state.is_done = True
             final_report = state.to_final_report()
             logger.info(f"[Orchestrator] FINAL shelf_results sample: {final_report.get('shelf_results', [])[:2]}")
+            logger.info(f"[Orchestrator] {_returned_summary(final_report)} (stop_reason={stop_reason})")
             yield {
                 "event": "complete",
                 "round": state.round_number,
                 "stop_reason": stop_reason,
-                "message": f"Stopping: {stop_reason}",
+                "rows_returned": final_report["recommended_result_count_returned"],
+                "rows_requested": final_report["recommended_result_count_requested"],
+                "message": f"Stopping: {stop_reason} · " + _returned_summary(final_report),
                 "data": final_report,
             }
             return
@@ -517,8 +594,9 @@ def _rule_based_decision(state: SessionState) -> tuple[str, dict]:
         return "evaluate", {"reasoning": "Unranked pages need scoring"}
 
     if state.unchecked_pages:
+        remaining = max(1, state.recommended_result_count - state.eligible_result_count)
         return "check_shelf", {
-            "max_pages": 5,
+            "max_pages": min(remaining, 10),
             "reasoning": "Ranked unchecked pages available",
         }
 

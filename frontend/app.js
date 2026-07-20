@@ -439,6 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
             { element: '#v2MaxRounds', ...pop('Max rounds', 'The maximum number of search → evaluate → check cycles the agent may run before stopping.', 'right') },
             { element: '#v2TargetMissing', ...pop('Target missing', 'The agent keeps working until it finds this many shelves where your product is missing (or runs out of rounds/budget).', 'right') },
             { element: '#v2Budget', ...pop('Budget (USD)', 'A hard spend cap for AI + API calls. The agent stops once this limit is reached.', 'right') },
+            { element: '#v2ResultCount', ...pop('Recommended Category Page Results', 'How many final category-page rows the analysis attempts to return (3–10, default 5). The agent keeps searching until it collects this many valid rows or runs out of keywords, rounds, or budget.', 'right') },
             { element: '#v2IncludeBranded', ...pop('Include branded shelves', 'When checked, the agent includes shelves discovered using searches that contain your brand name.', 'right') },
             { element: '#v2UserInstructions', ...pop('Agent context (optional)', 'Steer the agent toward the right shelves, e.g. "probiotic supplement — focus on pharmacy & wellness aisles."', 'top') },
             { element: '#v2AgentPanel', ...pop('7. Live processing', 'While running, this panel shows the agent\'s progress in real time — current round and running cost.'), onHighlightStarted: () => { tourRenderDemo(); } },
@@ -665,6 +666,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const budget           = parseFloat(document.getElementById('v2Budget').value) || 0.50;
         const includeBranded   = document.getElementById('v2IncludeBranded')?.checked || false;
         const userInstructions = (document.getElementById('v2UserInstructions')?.value || '').trim();
+        // Recommended Category Page Results — integer 3-10, default 5. The
+        // backend re-validates and rejects anything outside that range.
+        const resultCountInput = document.getElementById('v2ResultCount');
+        let resultCount = parseInt(resultCountInput?.value, 10);
+        if (!Number.isInteger(resultCount)) resultCount = 5;
+        resultCount = Math.min(10, Math.max(3, resultCount));
+        if (resultCountInput) resultCountInput.value = resultCount;
 
         resetV2UI();
 
@@ -678,7 +686,7 @@ document.addEventListener('DOMContentLoaded', () => {
         finalResultsPanel.classList.add('hidden');
 
         const llmProvider = v2LlmProvider ? v2LlmProvider.value : '';
-        let sseUrl = `/v2/analyze/stream?url=${encodeURIComponent(url)}&max_rounds=${maxRounds}&target_missing_count=${targetMissing}&budget_limit=${budget}&include_branded=${includeBranded}`;
+        let sseUrl = `/v2/analyze/stream?url=${encodeURIComponent(url)}&max_rounds=${maxRounds}&target_missing_count=${targetMissing}&budget_limit=${budget}&include_branded=${includeBranded}&recommended_result_count=${resultCount}`;
         if (llmProvider) sseUrl += `&llm_provider=${encodeURIComponent(llmProvider)}`;
         if (userInstructions) {
             sseUrl += `&user_instructions=${encodeURIComponent(userInstructions)}`;
@@ -731,7 +739,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Start pulsing indicator on stats bar
             v2StatsBar.classList.add('processing');
 
-            let loopMsg = `🔁 Agent loop started — max ${data.config?.max_rounds} rounds, target ${data.config?.target_missing_count} missing pages`;
+            let loopMsg = `🔁 Agent loop started — max ${data.config?.max_rounds} rounds · <strong>Target: ${data.config?.recommended_result_count ?? 5} recommended category pages</strong>`;
             if (data.config?.include_branded) {
                 loopMsg += ` · <span style="color:var(--accent-primary);font-weight:600;">branded shelves ON</span>`;
             }
@@ -770,13 +778,25 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (ev === 'goal_check') {
-            const pct = data.target > 0 ? Math.round((data.missing_found / data.target) * 100) : 0;
-            appendV2Log('goal', `🎯 Goal: ${data.missing_found}/${data.target} missing pages found (${pct}%)`);
+            if (Number.isInteger(data.rows_ready) && Number.isInteger(data.rows_target)) {
+                const pct = data.rows_target > 0 ? Math.round((data.rows_ready / data.rows_target) * 100) : 0;
+                appendV2Log('goal', `🎯 ${data.rows_ready} / ${data.rows_target} category pages ready (${pct}%)`);
+            } else {
+                const pct = data.target > 0 ? Math.round((data.missing_found / data.target) * 100) : 0;
+                appendV2Log('goal', `🎯 Goal: ${data.missing_found}/${data.target} missing pages found (${pct}%)`);
+            }
             return;
         }
 
         if (ev === 'complete') {
-            appendV2Log('done', `🏁 <strong>Complete</strong>: ${data.stop_reason || data.message}`);
+            let doneMsg = `🏁 <strong>Complete</strong>: ${data.stop_reason || data.message}`;
+            const requested = data.data?.recommended_result_count_requested;
+            const returned = data.data?.recommended_result_count_returned;
+            if (Number.isInteger(requested) && Number.isInteger(returned)) {
+                doneMsg += ` — Returned ${returned} of ${requested} requested category pages`;
+                if (returned < requested) doneMsg += ' (fewer valid pages were available)';
+            }
+            appendV2Log('done', doneMsg);
             if (data.data) {
                 renderV2FinalResults(data.data);
             }

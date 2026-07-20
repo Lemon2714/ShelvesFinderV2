@@ -120,6 +120,8 @@ class ShelfResult:
     discoverability: bool = False    # product present on the brand-filtered shelf ("Digital Shelf (Brand Filter)")
     placement_rank: Optional[int] = None  # first base-shelf Page 1 product-card rank
     placements: List[ProductPlacement] = field(default_factory=list)
+    relevance_score: float = 0.0     # embedding relevance carried from the BrowsePage
+    discovery_index: int = 0         # order this row was admitted (found+missing)
 
 
 @dataclass
@@ -160,6 +162,16 @@ class ActionHistory:
 # ---------------------------------------------------------------------------
 
 KEYWORD_LEVELS = ["specific", "broader", "category", "department"]
+
+
+# ---------------------------------------------------------------------------
+# Recommended Category Page Results — allowed range for the number of final
+# category-page rows returned under "Recommended Category Pages".
+# ---------------------------------------------------------------------------
+
+RECOMMENDED_RESULT_COUNT_MIN = 3
+RECOMMENDED_RESULT_COUNT_DEFAULT = 5
+RECOMMENDED_RESULT_COUNT_MAX = 10
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +218,10 @@ class SessionState:
     # Config (set from /v2/analyze/config)
     target_missing_count: int = 3
 
+    # Number of final category-page rows to return under
+    # "Recommended Category Pages" (min 3, max 10)
+    recommended_result_count: int = RECOMMENDED_RESULT_COUNT_DEFAULT
+
     # Optional user-supplied context injected into agent prompts
     user_instructions: str = ""
 
@@ -245,6 +261,53 @@ class SessionState:
     def record_cost(self, cost: float) -> None:
         self.total_openai_cost += cost
 
+    # ------------------------------------------------------------------
+    # Final-row selection for "Recommended Category Pages"
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_result_url(url: str) -> str:
+        return (url or "").split("#")[0].rstrip("/").lower()
+
+    def _unique_shelf_results(self) -> List[ShelfResult]:
+        """All eligible rows (found + missing), URL-deduplicated, in discovery order."""
+        combined = sorted(
+            self.found_pages + self.missing_pages,
+            key=lambda sr: sr.discovery_index,
+        )
+        seen: set = set()
+        unique: List[ShelfResult] = []
+        for sr in combined:
+            key = self._normalize_result_url(sr.page_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(sr)
+        return unique
+
+    @property
+    def eligible_result_count(self) -> int:
+        """Count of final category-page rows collected so far (uncapped)."""
+        return len(self._unique_shelf_results())
+
+    def selected_shelf_results(self) -> List[ShelfResult]:
+        """
+        The rows that make up the final report, capped at
+        recommended_result_count. When more eligible rows exist than
+        requested, the best rows win under a stable ordering:
+        relevance score desc, search position asc, discovery order, URL.
+        """
+        ranked = sorted(
+            self._unique_shelf_results(),
+            key=lambda sr: (
+                -sr.relevance_score,
+                sr.position if sr.position and sr.position > 0 else float("inf"),
+                sr.discovery_index,
+                self._normalize_result_url(sr.page_url),
+            ),
+        )
+        return ranked[: max(self.recommended_result_count, 0)]
+
     def to_summary_dict(self) -> dict:
         """Compact snapshot sent to LLM each iteration."""
         d = {
@@ -259,9 +322,13 @@ class SessionState:
             ],
             "pages_discovered": len(self.pages_discovered),
             "pages_unchecked": len(self.unchecked_pages),
+            "pages_unranked": len(self.unranked_pages),
+            "pages_ranked_unchecked": len(self.unchecked_pages) - len(self.unranked_pages),
             "missing_count": len(self.missing_pages),
             "found_count": len(self.found_pages),
             "target_missing": self.target_missing_count,
+            "eligible_rows": self.eligible_result_count,
+            "recommended_result_count": self.recommended_result_count,
             "total_cost_usd": round(self.total_openai_cost, 4),
             "budget_limit_usd": self.budget_limit,
             "recent_actions": self.history.to_summary_str(last_n=4),
@@ -273,12 +340,19 @@ class SessionState:
         return d
 
     def to_final_report(self) -> dict:
-        """Full structured output once the loop is done."""
+        """
+        Full structured output once the loop is done.
+
+        Only the selected rows (capped at recommended_result_count, in
+        selection order) are reported; dashboards, persistence, copy, and
+        email all derive from this same collection.
+        """
+        selected = self.selected_shelf_results()
         all_pages = []
-        for sr in self.found_pages:
+        for sr in selected:
             all_pages.append({
                 "url": sr.page_url,
-                "found": True,
+                "found": sr.product_found,
                 "brand_found": sr.brand_found,
                 "sponsored": sr.sponsored,
                 "organic": sr.organic,
@@ -291,26 +365,10 @@ class SessionState:
                 "keyword": sr.keyword,
                 "position": sr.position,
             })
-        for sr in self.missing_pages:
-            all_pages.append({
-                "url": sr.page_url,
-                "found": False,
-                "brand_found": sr.brand_found,
-                "sponsored": sr.sponsored,
-                "organic": sr.organic,
-                "visibility": sr.visibility,
-                "discoverability": sr.discoverability,
-                "placement_rank": sr.placement_rank,
-                "placements": [p.to_dict() for p in sr.placements],
-                "page_number": 0,
-                "confidence": sr.confidence,
-                "keyword": sr.keyword,
-                "position": sr.position,
-            })
 
         # Dashboard aggregates. The shared Discoverability Dashboard is driven by
         # Discoverability; visible/discoverable counts expose both signals.
-        all_results = self.found_pages + self.missing_pages
+        all_results = selected
         total_checked = len(all_results)
         visible_count = sum(1 for sr in all_results if sr.visibility)
         discoverable_count = sum(1 for sr in all_results if sr.discoverability)
@@ -328,6 +386,8 @@ class SessionState:
             "keywords_used": self.keywords_tried,
             "rounds_completed": self.round_number,
             "stop_reason": self.stop_reason,
+            "recommended_result_count_requested": self.recommended_result_count,
+            "recommended_result_count_returned": len(all_pages),
             "shelf_results": all_pages,
             "shelf_stats": {
                 "total": total_checked,
@@ -347,7 +407,7 @@ class SessionState:
                 "organic_pages": sum(1 for sr in all_results if sr.organic),
                 "sponsored_pages": sum(1 for sr in all_results if sr.sponsored),
                 "details": {
-                    sr.page_url: True for sr in self.found_pages
+                    sr.page_url: True for sr in selected if sr.product_found
                 },
             },
             "openai_cost_usd": round(self.total_openai_cost, 6),
