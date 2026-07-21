@@ -2,15 +2,18 @@
 
 import base64
 import json
+import urllib.parse
 
 import pytest
 
 from app.tools.shelf_classifier import (
+    canonicalize_recovery_dedup_url,
     classify_fetched_shelf,
     classify_shelf,
     extract_facet_brand,
     extract_page_brand_metadata,
     harvest_known_brands,
+    recover_generic_shelf_url,
 )
 
 BRAND = "Head & Shoulders"
@@ -239,6 +242,127 @@ class TestBrandFacetUrls:
 
     def test_no_facet_returns_none(self) -> None:
         assert extract_facet_brand(GENERIC_URL) is None
+
+
+class TestGenericShelfRecovery:
+    LONG_GENERIC_URL = (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/"
+        "1085666_3147628_5752434_2927912_4339403"
+    )
+
+    @pytest.mark.parametrize("brand", ["Leader", "DHS", "Equate"])
+    def test_recovers_encoded_path_brand_facets(self, brand: str) -> None:
+        assert recover_generic_shelf_url(
+            ENCODED_BRAND_URLS[brand], brand=brand
+        ) == self.LONG_GENERIC_URL
+
+    def test_preserves_unrelated_path_and_complete_category_id(self) -> None:
+        url = (
+            "https://www.walmart.com/browse/beauty/hair-care/"
+            "dandruff-shampoo/leader/"
+            "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6TGVhZGVy"
+        )
+        assert recover_generic_shelf_url(url) == (
+            "https://www.walmart.com/browse/beauty/hair-care/"
+            "dandruff-shampoo/1085666_3147628_5752434_2927912_4339403"
+        )
+
+    def test_only_removes_exact_matching_seo_brand_slug(self) -> None:
+        url = ENCODED_BRAND_URLS["Leader"].replace("/leader/", "/leader-care/")
+        assert recover_generic_shelf_url(url) == (
+            "https://www.walmart.com/browse/beauty/dandruff-shampoo/leader-care/"
+            "1085666_3147628_5752434_2927912_4339403"
+        )
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            "?facet=brand:OGX",
+            "?facet=brand%3AHead%20%26%20Shoulders",
+            "?brand=Dove",
+        ],
+    )
+    def test_removes_query_brand_facets(self, suffix: str) -> None:
+        assert recover_generic_shelf_url(GENERIC_URL + suffix) == GENERIC_URL
+
+    def test_preserves_other_query_parameters_and_facet_components(self) -> None:
+        url = (
+            GENERIC_URL
+            + "?facet=rating%3A4%7C%7Cbrand%3ADove%7C%7Ccolor%3ABlue"
+            + "&sort=best_seller"
+        )
+        recovered = recover_generic_shelf_url(url)
+        assert recovered is not None
+        parsed = urllib.parse.urlparse(recovered)
+        assert urllib.parse.parse_qs(parsed.query) == {
+            "facet": ["rating:4||color:Blue"],
+            "sort": ["best_seller"],
+        }
+        assert extract_facet_brand(recovered) is None
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            PRODUCT_BRAND_URL,
+            "https://www.walmart.com/browse/brands/dove/1085666",
+            GENERIC_URL,
+            "https://example.com/browse/beauty/shampoo/123?brand=Dove",
+            "https://www.walmart.com/search?q=shampoo&brand=Dove",
+            "https://shop.walmart.com/browse/beauty/shampoo/123?brand=Dove",
+            "https://www.walmart.com/browse/beauty/shampoo/123/YnJhbmQ6",
+        ],
+    )
+    def test_unsupported_or_unfaceted_urls_fail_closed(self, url: str) -> None:
+        assert recover_generic_shelf_url(url) is None
+
+    def test_conflicting_explicit_brands_are_ambiguous(self) -> None:
+        url = GENERIC_URL + "?facet=brand%3ADove%7C%7Cbrand%3AOGX"
+        assert recover_generic_shelf_url(url) is None
+
+    def test_query_facet_does_not_convert_brand_category_node(self) -> None:
+        url = PRODUCT_BRAND_URL + "?brand=Head%20%26%20Shoulders"
+        assert recover_generic_shelf_url(url) is None
+
+    def test_caller_brand_must_match_detected_brand(self) -> None:
+        assert recover_generic_shelf_url(
+            ENCODED_BRAND_URLS["Leader"], brand="DHS"
+        ) is None
+
+
+class TestRecoveryDedupCanonicalization:
+    def test_safe_url_variants_have_one_key(self) -> None:
+        category_path = (
+            "/browse/beauty/dandruff-shampoo/"
+            "1085666_3147628_5752434_2927912_4339403"
+        )
+        variants = [
+            f"https://WWW.WALMART.COM{category_path}/?b=2&a=1#results",
+            f"https://walmart.com{category_path}?a=1&b=2",
+            f"https://www.walmart.com{category_path}?b=2&a=1#other",
+        ]
+
+        assert len({canonicalize_recovery_dedup_url(url) for url in variants}) == 1
+
+    def test_distinct_category_id_paths_keep_distinct_keys(self) -> None:
+        first = canonicalize_recovery_dedup_url(
+            "https://www.walmart.com/browse/beauty/shampoo/1085666_111"
+        )
+        second = canonicalize_recovery_dedup_url(
+            "https://www.walmart.com/browse/beauty/shampoo/1085666_112"
+        )
+
+        assert first != second
+
+    def test_query_names_and_values_are_preserved(self) -> None:
+        key = canonicalize_recovery_dedup_url(
+            "https://walmart.com/browse/beauty/shampoo/123?sort=best&facet=color%3ABlue"
+        )
+
+        assert key is not None
+        assert urllib.parse.parse_qsl(urllib.parse.urlsplit(key).query) == [
+            ("facet", "color:Blue"),
+            ("sort", "best"),
+        ]
 
 
 class TestBrandPathUrls:

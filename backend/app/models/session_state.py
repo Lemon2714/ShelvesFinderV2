@@ -251,6 +251,12 @@ class SessionState:
     # Pages
     pages_discovered: List[BrowsePage] = field(default_factory=list)
     pages_checked: List[BrowsePage] = field(default_factory=list)
+    # Canonical URLs of generic shelves whose recovery was logged during this
+    # session. This is transient observability state only: recovered URLs are
+    # never admitted, checked, persisted, counted, or included in reports.
+    _recovered_generic_url_keys: set[str] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     # Results
     missing_pages: List[ShelfResult] = field(default_factory=list)

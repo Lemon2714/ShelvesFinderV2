@@ -280,6 +280,161 @@ def extract_facet_brand(url: str) -> Optional[str]:
     return _path_facet_brand(parsed)
 
 
+def canonicalize_recovery_dedup_url(url: str) -> Optional[str]:
+    """Return a conservative canonical key for recovery observability.
+
+    This intentionally does not alter path segments or discard query data. It
+    only normalizes URL components whose equivalence is safe for the recovery
+    deduplication use case, and performs no network access.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return None
+
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+        hostname = (parsed.hostname or "").lower()
+        if not parsed.scheme or not hostname:
+            return None
+
+        if hostname in {"walmart.com", "www.walmart.com"}:
+            hostname = "www.walmart.com"
+
+        # Rebuild only the host/port portion. Recovery candidates are ordinary
+        # public Walmart URLs, so user-info is deliberately not canonicalized.
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        host_for_netloc = f"[{hostname}]" if ":" in hostname else hostname
+        if parsed.port is not None:
+            host_for_netloc = f"{host_for_netloc}:{parsed.port}"
+
+        path = parsed.path.rstrip("/")
+        query_pairs = urllib.parse.parse_qsl(
+            parsed.query, keep_blank_values=True
+        )
+        canonical_query = urllib.parse.urlencode(sorted(query_pairs), doseq=True)
+        return urllib.parse.urlunsplit((
+            parsed.scheme.lower(),
+            host_for_netloc,
+            path,
+            canonical_query,
+            "",
+        ))
+    except (TypeError, ValueError):
+        return None
+
+
+def recover_generic_shelf_url(url: str, brand: str = "") -> Optional[str]:
+    """
+    Remove a recognized explicit brand facet from a Walmart browse URL.
+
+    Recovery is deliberately structural and conservative: it never changes a
+    category-ID segment, never guesses a parent category, and returns ``None``
+    when multiple different brands are encoded. ``brand`` may be supplied by
+    the caller as an additional consistency check (for example, from
+    :func:`classify_shelf`).
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if hostname not in {"walmart.com", "www.walmart.com"}:
+            return None
+
+        segments = parsed.path.split("/")
+        nonempty_segments = [segment for segment in segments if segment]
+        if not nonempty_segments or nonempty_segments[0].lower() != "browse":
+            return None
+
+        params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    except (TypeError, ValueError):
+        return None
+
+    detected_brands: list[str] = []
+    path_facet_indexes: set[int] = set()
+
+    for index, segment in enumerate(segments):
+        detected = _decode_path_facet_brand(segment)
+        if detected:
+            detected_brands.append(detected)
+            path_facet_indexes.add(index)
+
+    recovered_params: list[tuple[str, str]] = []
+    for name, value in params:
+        name_l = name.lower()
+        if name_l == "brand":
+            detected = _validated_brand_value(value)
+            if detected:
+                detected_brands.append(detected)
+                continue
+
+        if "facet" in name_l and value:
+            parts = re.split(r"\|\||,", value)
+            retained_parts: list[str] = []
+            removed_brand = False
+            for part in parts:
+                match = re.match(r"\s*brand\s*:\s*(.+)", part, re.IGNORECASE)
+                detected = (
+                    _validated_brand_value(match.group(1)) if match else None
+                )
+                if detected:
+                    detected_brands.append(detected)
+                    removed_brand = True
+                else:
+                    retained_parts.append(part)
+
+            if removed_brand:
+                if retained_parts:
+                    recovered_params.append((name, "||".join(retained_parts)))
+                continue
+
+        recovered_params.append((name, value))
+
+    detected_keys = {_brand_key(value) for value in detected_brands}
+    detected_keys.discard("")
+    if not detected_brands or len(detected_keys) != 1:
+        return None
+
+    detected_key = next(iter(detected_keys))
+    if brand and _brand_key(brand) != detected_key:
+        return None
+
+    recovered_segments = [
+        segment for index, segment in enumerate(segments)
+        if index not in path_facet_indexes
+    ]
+
+    # Walmart's encoded-facet browse URLs can include an SEO brand slug
+    # immediately before the complete numeric category-ID segment. Remove that
+    # slug only on an exact normalized brand match. No ID is ever edited.
+    seo_slug_indexes = (
+        [
+            index
+            for index, segment in enumerate(recovered_segments[:-1])
+            if segment
+            and _brand_key(segment) == detected_key
+            and _ID_SEGMENT_RE.fullmatch(recovered_segments[index + 1])
+        ]
+        if path_facet_indexes
+        else []
+    )
+    if len(seo_slug_indexes) > 1:
+        return None
+    if seo_slug_indexes:
+        del recovered_segments[seo_slug_indexes[0]]
+
+    recovered = urllib.parse.urlunparse(parsed._replace(
+        path="/".join(recovered_segments),
+        query=urllib.parse.urlencode(recovered_params, doseq=True),
+    ))
+
+    # A malformed or only partially stripped URL must fail closed rather than
+    # leaking another explicit brand facet into the log as a generic candidate.
+    if recovered == url or extract_facet_brand(recovered) is not None:
+        return None
+    if classify_shelf(recovered, product_brand=detected_brands[0]).is_branded:
+        return None
+    return recovered
+
+
 def _clean_title(title: str) -> str:
     """Strip the trailing ' - Walmart.com' style suffix from a result title."""
     return _TITLE_SUFFIX_RE.sub("", str(title or "")).strip()

@@ -136,7 +136,12 @@ def _check_stopping_conditions(state: SessionState) -> tuple[bool, str]:
 async def _call_search(state: SessionState, args: dict) -> ToolResult:
     """Execute the search tool."""
     from app.agents.search_agent import find_browse_pages
-    from app.tools.shelf_classifier import classify_shelf, harvest_known_brands
+    from app.tools.shelf_classifier import (
+        canonicalize_recovery_dedup_url,
+        classify_shelf,
+        harvest_known_brands,
+        recover_generic_shelf_url,
+    )
 
     keywords: list[str] = args.get("keywords", [])
 
@@ -157,6 +162,29 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
         new_pages: list[BrowsePage] = []
         rejected_branded = 0
         existing_urls = {p.url for p in state.pages_discovered}
+
+        # Recovery observability must see the complete batch before iteration:
+        # a generic result later in the list takes precedence over every
+        # branded URL that structurally recovers to it.
+        direct_batch_keys = {
+            key
+            for rp in raw_pages
+            if (key := canonicalize_recovery_dedup_url(
+                rp.get("url") if isinstance(rp, dict) else str(rp)
+            ))
+        }
+        represented_session_urls = (
+            [page.url for page in state.pages_discovered]
+            + [page.url for page in state.pages_checked]
+            + [result.page_url for result in state.found_pages]
+            + [result.page_url for result in state.missing_pages]
+            + [result.page_url for result in state.unavailable_pages]
+        )
+        represented_session_keys = {
+            key
+            for url in represented_session_urls
+            if (key := canonicalize_recovery_dedup_url(url))
+        }
         for rp in raw_pages:
             url = rp.get("url") if isinstance(rp, dict) else str(rp)
             if url and url not in existing_urls:
@@ -183,6 +211,42 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
                         f"[Search] Rejected branded shelf ({classification.reason}, "
                         f"brand='{classification.brand}'): {url}"
                     )
+                    if classification.reason == "brand_facet":
+                        recovered_url = recover_generic_shelf_url(
+                            url, brand=classification.brand
+                        )
+                        if recovered_url:
+                            recovered_key = canonicalize_recovery_dedup_url(
+                                recovered_url
+                            )
+                            skip_reason = ""
+                            if recovered_key in direct_batch_keys:
+                                skip_reason = "direct_in_current_batch"
+                            elif recovered_key in represented_session_keys:
+                                skip_reason = "already_discovered"
+                            elif recovered_key in state._recovered_generic_url_keys:
+                                skip_reason = "duplicate_recovery"
+
+                            if skip_reason:
+                                logger.debug(
+                                    f"[Search] Skipped recovered generic shelf "
+                                    f"candidate (log_only, reason={skip_reason}): "
+                                    f"{recovered_url}"
+                                )
+                            elif recovered_key:
+                                state._recovered_generic_url_keys.add(recovered_key)
+                                logger.info(
+                                    f"[Search] Recovered generic shelf candidate "
+                                    f"(log_only, source=brand_facet, "
+                                    f"brand='{classification.brand}', "
+                                    f"keyword='{kw}'): {recovered_url}"
+                                )
+                        else:
+                            logger.debug(
+                                f"[Search] Generic shelf recovery unavailable "
+                                f"(log_only, source=brand_facet, "
+                                f"reason=ambiguous_or_unsupported): {url}"
+                            )
                     existing_urls.add(url)
                     continue
 

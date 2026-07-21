@@ -7,6 +7,7 @@ frontend-to-backend flow of the setting — all with deterministic mocks.
 """
 
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -24,6 +25,10 @@ BRAND = "Head & Shoulders"
 PRODUCT_ID = "12345"
 
 GENERIC_URL = "https://www.walmart.com/browse/beauty/dandruff-shampoo/1085666_1071969"
+RECOVERED_GENERIC_URL = (
+    "https://www.walmart.com/browse/beauty/dandruff-shampoo/"
+    "1085666_3147628_5752434_2927912_4339403"
+)
 PRODUCT_BRAND_URL = "https://www.walmart.com/browse/beauty/shampoo/head-shoulders/1085666_123"
 COMPETITOR_FACET_URL = (
     "https://www.walmart.com/browse/beauty/shampoo/1085666_456?facet=brand%3AOGX"
@@ -92,6 +97,20 @@ def _encoded_path_search_batch() -> list[dict]:
         "title": "Dandruff Shampoo - Walmart.com",
     })
     return pages
+
+
+def _recovery_info_messages(caplog) -> list[str]:
+    return [
+        message for message in caplog.messages
+        if "[Search] Recovered generic shelf candidate" in message
+    ]
+
+
+def _recovery_debug_messages(caplog) -> list[str]:
+    return [
+        message for message in caplog.messages
+        if "[Search] Skipped recovered generic shelf candidate" in message
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +397,245 @@ class TestKeywordPromptContract:
 
 class TestSearchFiltering:
     @patch("app.agents.search_agent.find_browse_pages")
+    async def test_off_logs_recovered_candidate_without_admitting_it(
+        self, mock_find, caplog
+    ):
+        branded_url = ENCODED_BRAND_URLS["Leader"]
+        mock_find.return_value = [{
+            "url": branded_url,
+            "keyword": "dandruff shampoo",
+            "position": 1,
+            "title": "Leader Dandruff Shampoo - Walmart.com",
+        }]
+        state = _make_state(include_branded=False)
+
+        with caplog.at_level(logging.INFO, logger="app.agents.orchestrator"):
+            result = await _call_search(
+                state, {"keywords": ["dandruff shampoo"]}
+            )
+
+        assert result.success
+        assert result.data["new_pages"] == 0
+        assert result.data["rejected_branded"] == 1
+        assert state.pages_discovered == []
+        assert RECOVERED_GENERIC_URL not in [
+            page.url for page in state.pages_discovered
+        ]
+        rejection_index = next(
+            i for i, message in enumerate(caplog.messages)
+            if "[Search] Rejected branded shelf (brand_facet, brand='Leader')" in message
+        )
+        recovery_index = next(
+            i for i, message in enumerate(caplog.messages)
+            if (
+                "[Search] Recovered generic shelf candidate "
+                "(log_only, source=brand_facet, brand='Leader', "
+                "keyword='dandruff shampoo')" in message
+            )
+        )
+        assert recovery_index == rejection_index + 1
+        assert caplog.messages[recovery_index].endswith(RECOVERED_GENERIC_URL)
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_duplicate_brands_and_keywords_log_one_recovery(
+        self, mock_find, caplog
+    ):
+        mock_find.return_value = [
+            {
+                "url": ENCODED_BRAND_URLS[brand],
+                "keyword": keyword,
+                "position": position,
+                "title": f"{brand} Dandruff Shampoo - Walmart.com",
+            }
+            for position, (brand, keyword) in enumerate(
+                [
+                    ("Leader", "dandruff shampoo"),
+                    ("Vichy", "dry scalp shampoo"),
+                    ("DHS", "medicated shampoo"),
+                ],
+                1,
+            )
+        ]
+        state = _make_state(include_branded=False)
+        summary_before = state.to_summary_dict()
+        stopping_before = _check_stopping_conditions(state)
+
+        with caplog.at_level(logging.DEBUG, logger="app.agents.orchestrator"):
+            result = await _call_search(
+                state,
+                {"keywords": [
+                    "dandruff shampoo", "dry scalp shampoo", "medicated shampoo"
+                ]},
+            )
+
+        assert result.data["new_pages"] == 0
+        assert result.data["rejected_branded"] == 3
+        assert state.pages_discovered == []
+        assert len(_recovery_info_messages(caplog)) == 1
+        assert len(_recovery_debug_messages(caplog)) == 2
+        assert all(
+            "reason=duplicate_recovery" in message
+            for message in _recovery_debug_messages(caplog)
+        )
+        assert "_recovered_generic_url_keys" not in state.to_summary_dict()
+        assert state.to_summary_dict()["pages_discovered"] == summary_before[
+            "pages_discovered"
+        ]
+        assert state.to_summary_dict()["eligible_rows"] == summary_before[
+            "eligible_rows"
+        ]
+        assert _check_stopping_conditions(state) == stopping_before
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_direct_generic_later_wins_and_keeps_metadata(
+        self, mock_find, caplog
+    ):
+        mock_find.return_value = [
+            {
+                "url": ENCODED_BRAND_URLS["Leader"],
+                "keyword": "source keyword",
+                "position": 1,
+                "title": "Leader Dandruff Shampoo - Walmart.com",
+            },
+            {
+                "url": ENCODED_BRAND_URLS["DHS"],
+                "keyword": "other keyword",
+                "position": 2,
+                "title": "DHS Dandruff Shampoo - Walmart.com",
+            },
+            {
+                "url": RECOVERED_GENERIC_URL,
+                "keyword": "direct keyword",
+                "position": 9,
+                "title": "Direct Generic Shelf - Walmart.com",
+            },
+        ]
+        state = _make_state(include_branded=False)
+
+        with caplog.at_level(logging.DEBUG, logger="app.agents.orchestrator"):
+            result = await _call_search(state, {"keywords": ["source keyword"]})
+
+        assert result.data["new_pages"] == 1
+        assert result.data["rejected_branded"] == 2
+        assert _recovery_info_messages(caplog) == []
+        skipped = _recovery_debug_messages(caplog)
+        assert len(skipped) == 2
+        assert all("reason=direct_in_current_batch" in message for message in skipped)
+        assert len(state.pages_discovered) == 1
+        direct = state.pages_discovered[0]
+        assert direct.url == RECOVERED_GENERIC_URL
+        assert direct.keyword == "direct keyword"
+        assert direct.position == 9
+        assert direct.title == "Direct Generic Shelf - Walmart.com"
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_existing_discovered_url_suppresses_recovery(
+        self, mock_find, caplog
+    ):
+        mock_find.return_value = [{"url": ENCODED_BRAND_URLS["Leader"]}]
+        state = _make_state(include_branded=False)
+        state.pages_discovered = [BrowsePage(url=RECOVERED_GENERIC_URL)]
+
+        with caplog.at_level(logging.DEBUG, logger="app.agents.orchestrator"):
+            result = await _call_search(state, {"keywords": ["shampoo"]})
+
+        assert result.data["rejected_branded"] == 1
+        assert _recovery_info_messages(caplog) == []
+        assert any(
+            "reason=already_discovered" in message
+            for message in _recovery_debug_messages(caplog)
+        )
+        assert [page.url for page in state.pages_discovered] == [
+            RECOVERED_GENERIC_URL
+        ]
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_previously_checked_url_suppresses_recovery(
+        self, mock_find, caplog
+    ):
+        mock_find.return_value = [{"url": ENCODED_BRAND_URLS["Leader"]}]
+        state = _make_state(include_branded=False)
+        state.pages_checked = [
+            BrowsePage(url=RECOVERED_GENERIC_URL, checked=True)
+        ]
+
+        with caplog.at_level(logging.DEBUG, logger="app.agents.orchestrator"):
+            await _call_search(state, {"keywords": ["shampoo"]})
+
+        assert _recovery_info_messages(caplog) == []
+        assert any(
+            "reason=already_discovered" in message
+            for message in _recovery_debug_messages(caplog)
+        )
+        assert state.pages_discovered == []
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_recovery_logged_in_prior_round_is_debug_only_later(
+        self, mock_find, caplog
+    ):
+        state = _make_state(include_branded=False)
+        mock_find.return_value = [{"url": ENCODED_BRAND_URLS["Leader"]}]
+
+        with caplog.at_level(logging.DEBUG, logger="app.agents.orchestrator"):
+            first = await _call_search(state, {"keywords": ["first keyword"]})
+            mock_find.return_value = [{"url": ENCODED_BRAND_URLS["Vichy"]}]
+            second = await _call_search(state, {"keywords": ["second keyword"]})
+
+        assert first.data["rejected_branded"] == 1
+        assert second.data["rejected_branded"] == 1
+        assert len(_recovery_info_messages(caplog)) == 1
+        assert any(
+            "reason=duplicate_recovery" in message
+            for message in _recovery_debug_messages(caplog)
+        )
+        assert state.pages_discovered == []
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_distinct_recovered_category_ids_each_log_once(
+        self, mock_find, caplog
+    ):
+        second_url = ENCODED_BRAND_URLS["DHS"].replace(
+            "1085666_3147628_5752434_2927912_4339403",
+            "1085666_3147628_5752434_2927912_4339404",
+        )
+        mock_find.return_value = [
+            {"url": ENCODED_BRAND_URLS["Leader"], "keyword": "shampoo"},
+            {"url": second_url, "keyword": "shampoo"},
+        ]
+        state = _make_state(include_branded=False)
+
+        with caplog.at_level(logging.INFO, logger="app.agents.orchestrator"):
+            await _call_search(state, {"keywords": ["shampoo"]})
+
+        messages = _recovery_info_messages(caplog)
+        assert len(messages) == 2
+        assert any(message.endswith("4339403") for message in messages)
+        assert any(message.endswith("4339404") for message in messages)
+        assert state.pages_discovered == []
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_canonical_existing_variant_suppresses_recovery(
+        self, mock_find, caplog
+    ):
+        branded_with_query = ENCODED_BRAND_URLS["Leader"] + "?b=2&a=1"
+        mock_find.return_value = [{"url": branded_with_query}]
+        state = _make_state(include_branded=False)
+        state.pages_discovered = [BrowsePage(
+            url=RECOVERED_GENERIC_URL.replace(
+                "https://www.walmart.com", "https://WALMART.COM"
+            ) + "/?a=1&b=2#section"
+        )]
+
+        with caplog.at_level(logging.DEBUG, logger="app.agents.orchestrator"):
+            await _call_search(state, {"keywords": ["shampoo"]})
+
+        assert _recovery_info_messages(caplog) == []
+        assert any(
+            "reason=already_discovered" in message
+            for message in _recovery_debug_messages(caplog)
+        )
+
+    @patch("app.agents.search_agent.find_browse_pages")
     async def test_off_rejects_encoded_path_facets_before_admission(
         self, mock_find
     ):
@@ -394,12 +652,15 @@ class TestSearchFiltering:
         assert set(ENCODED_BRAND_URLS) <= state.known_brand_terms
 
     @patch("app.agents.search_agent.find_browse_pages")
-    async def test_on_admits_and_marks_encoded_path_facets(self, mock_find):
+    async def test_on_admits_and_marks_encoded_path_facets(self, mock_find, caplog):
         mock_find.return_value = _encoded_path_search_batch()
         state = _make_state(include_branded=True)
         state.keywords_pending = ["dandruff shampoo"]
 
-        result = await _call_search(state, {"keywords": ["dandruff shampoo"]})
+        with caplog.at_level(logging.INFO, logger="app.agents.orchestrator"):
+            result = await _call_search(
+                state, {"keywords": ["dandruff shampoo"]}
+            )
 
         assert result.success
         assert result.data["new_pages"] == len(ENCODED_BRAND_URLS) + 1
@@ -407,6 +668,10 @@ class TestSearchFiltering:
         flags = {page.url: page.is_branded for page in state.pages_discovered}
         assert flags[GENERIC_URL] is False
         assert all(flags[url] is True for url in ENCODED_BRAND_URLS.values())
+        assert not any(
+            "Recovered generic shelf candidate" in message
+            for message in caplog.messages
+        )
 
     @patch("app.agents.search_agent.find_browse_pages")
     async def test_encoded_facet_brand_classifies_unfaceted_sibling(
