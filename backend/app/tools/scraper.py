@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import logging
 import json
 import re
+import time
 from app.config import settings
 from app.tools.product_identity import (
     normalize_product_identity,
@@ -11,6 +12,29 @@ from app.tools.product_identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+# WebScrapingAPI fetch tuning. Walmart product pages rendered with render_js can
+# take well over 30s to return, so the API is given a generous window and a
+# couple of attempts before we fall back to the (captcha-prone) direct request.
+# Kept in step with shelf_checker._fetch_html so both fetch paths behave alike.
+_API_MAX_ATTEMPTS = 2
+_API_RETRY_BACKOFF_SECONDS = 0.5
+_API_TIMEOUT_SECONDS = 60
+_DIRECT_TIMEOUT_SECONDS = 30
+
+
+def _api_error_is_retryable(exc: Exception) -> bool:
+    """Retry transient provider/rate-limit failures, but not full-window timeouts.
+
+    A timeout means the render genuinely took longer than the (already generous)
+    window, so retrying just burns another window; 429/5xx are momentary and
+    worth a second attempt.
+    """
+    if isinstance(exc, requests.Timeout):
+        return False
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status == 429 or (isinstance(status, int) and 500 <= status < 600)
 
 
 # ---------------------------------------------------------------------------
@@ -226,12 +250,31 @@ def fetch_product_content(url: str) -> dict:
                 "Accept-Language": "en-US,en;q=0.9",
                 "Wsa-Accept-Language": "en-US,en;q=0.9",
             }
-            try:
-                response = requests.get(api_url, params=params, headers=wsa_headers, timeout=30)
-                response.raise_for_status()
-                html_content = response.text
-            except Exception as api_err:
-                logger.warning(f"[Scraper] WebScrapingAPI failed ({api_err}). Falling back to direct request.")
+            for attempt in range(1, _API_MAX_ATTEMPTS + 1):
+                try:
+                    response = requests.get(
+                        api_url,
+                        params=params,
+                        headers=wsa_headers,
+                        timeout=_API_TIMEOUT_SECONDS,
+                    )
+                    response.raise_for_status()
+                    html_content = response.text
+                    break
+                except Exception as api_err:
+                    if attempt < _API_MAX_ATTEMPTS and _api_error_is_retryable(api_err):
+                        delay = _API_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                        logger.warning(
+                            f"[Scraper] WebScrapingAPI attempt {attempt} failed "
+                            f"({api_err}). Retrying in {delay:.1f}s."
+                        )
+                        time.sleep(delay)
+                        continue
+                    logger.warning(
+                        f"[Scraper] WebScrapingAPI failed ({api_err}). "
+                        f"Falling back to direct request."
+                    )
+                    break
 
         if not html_content:
             logger.info(f"[Scraper] Using direct request for {url}")
@@ -240,7 +283,7 @@ def fetch_product_content(url: str) -> dict:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
             }
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=_DIRECT_TIMEOUT_SECONDS)
             response.raise_for_status()
             html_content = response.text
 

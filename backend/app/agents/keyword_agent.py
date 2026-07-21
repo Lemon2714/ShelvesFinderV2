@@ -26,6 +26,11 @@ Bad keywords are long product descriptions that would never be a shelf name:
   ❌  "best probiotic 50 billion CFU lactobacillus acidophilus"
   ❌  "high potency omega-3 fish oil softgels with EPA and DHA"
 
+Order the unbranded shelf terms from the MOST SPECIFIC subcategory that matches \
+the product's own name and defining attributes to the MOST GENERAL department \
+(Subcategory → Category → Department). This ordering applies only to the \
+unbranded shelves; branded terms are not reordered.
+
 Think like a Walmart category manager naming a shelf, not a shopper typing into Google.\
 """
 
@@ -45,12 +50,25 @@ def _build_prompt(
     When include_branded=False  → asks for unbranded shelf terms only.
     When include_branded=True   → asks for both branded and unbranded terms.
     """
-    # --- Example (few-shot, always unbranded style) ---
+    # --- Examples (few-shot). Each derives the LEADING specific shelves from the
+    #     product's own title/attributes, then broadens: specific → general. ---
     example = (
-        "Example — for a Nordic Naturals Omega-3 Fish Oil 1000mg supplement:\n"
-        "  Good: [\"fish oil\", \"omega 3 supplements\", \"vitamins & supplements\",\n"
-        "          \"heart health supplements\", \"dietary supplements\", \"grocery vitamins\"]\n"
-        "  Bad:  [\"nordic naturals\", \"1000mg epa dha\", "
+        "Order the unbranded list from MOST SPECIFIC (the subcategory shelf that "
+        "best matches the product's own name and defining attributes) to MOST "
+        "GENERAL (broader category, then top-level department).\n\n"
+        "Example 1 — \"Head & Shoulders Dandruff Shampoo, Classic Clean, 1% "
+        "Pyrithione Zinc, 28.2 fl oz\":\n"
+        "  Good (specific → general):\n"
+        "    [\"dandruff shampoo\", \"pyrithione zinc shampoo\", "
+        "\"anti-dandruff shampoo\",\n"
+        "     \"shampoo\", \"hair care\", \"personal care\"]\n"
+        "  Bad: [\"head & shoulders\", \"1% pyrithione zinc 28.2 fl oz\", "
+        "\"classic clean anti-dandruff formula\"]\n\n"
+        "Example 2 — \"Nordic Naturals Omega-3 Fish Oil 1000mg\":\n"
+        "  Good (specific → general):\n"
+        "    [\"fish oil\", \"omega 3 supplements\", \"heart health supplements\",\n"
+        "     \"dietary supplements\", \"vitamins & supplements\"]\n"
+        "  Bad: [\"nordic naturals\", \"1000mg epa dha\", "
         "\"high potency fish oil capsules\"]\n\n"
     )
 
@@ -61,7 +79,11 @@ def _build_prompt(
             f"The brand is '{brand}'.\n\n"
             "Produce TWO lists based on following criteria:\n"
             "  1. Generic keywords that a shopper likely to search when they are looking for this type of product.\n"
-            "  2. unbranded_keywords — 6-8 shelf-style terms with NO brand name.\n"
+            "  2. unbranded_keywords — 6-8 shelf-style terms with NO brand name,\n"
+            "     ORDERED from MOST SPECIFIC to MOST GENERAL: lead with the\n"
+            "     subcategory shelves that most closely match this product's own\n"
+            "     name and defining attributes, then broaden to category shelves,\n"
+            "     then the top-level department last.\n"
             "     Think: what Walmart category/subcategory shelves would this live on?\n"
             "     Each keyword should be 1-4 words, short enough to be a shelf name.\n\n"
             "  3. branded_keywords — 3-5 terms that INCLUDE the brand name of this brand and competition brand.\n"
@@ -79,12 +101,15 @@ def _build_prompt(
             f"Generate keywords for the Walmart product below. "
             f"The brand is '{brand}'.\n\n"
             "Produce ONE list:\n"
-            "  unbranded_keywords — 6-8 shelf-style terms with NO brand name.\n"
+            "  unbranded_keywords — 6-8 shelf-style terms with NO brand name,\n"
+            "  ORDERED from MOST SPECIFIC to MOST GENERAL.\n"
             "  Think: what Walmart category/subcategory shelves would this live on?\n"
-            "  Include a mix of:\n"
-            "    - Specific subcategory shelves  (e.g. 'probiotics', 'prenatal vitamins')\n"
-            "    - Broader category shelves      (e.g. 'vitamins & supplements')\n"
-            "    - Adjacent shelves it might appear on\n"
+            "  Lead with the subcategory shelves that most closely match the\n"
+            "  product's own name and defining attributes, then broaden:\n"
+            "    - Most specific subcategory shelves first (e.g. 'dandruff shampoo',\n"
+            "      'pyrithione zinc shampoo')\n"
+            "    - Then broader category shelves           (e.g. 'shampoo', 'hair care')\n"
+            "    - Then the general department last        (e.g. 'personal care')\n"
             "  Each keyword should be 1-4 words — short enough to be a shelf name.\n\n"
         )
         json_format = '{"unbranded_keywords": ["shelf term 1", "shelf term 2", ...]}'

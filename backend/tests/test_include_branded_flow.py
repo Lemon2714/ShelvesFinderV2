@@ -16,6 +16,7 @@ from app.agents.orchestrator import (
     _call_search,
     _call_check_shelf,
     _check_stopping_conditions,
+    _rule_based_decision,
 )
 from app.models.session_state import BrowsePage, ProductInfo, SessionState, ShelfResult
 
@@ -176,6 +177,199 @@ class TestKeywordGeneration:
         assert state.keywords_unbranded == ["dandruff shampoo"]
         assert state.keyword_type_for("head & shoulders shampoo") == "branded"
         assert state.keyword_type_for("dandruff shampoo") == "generic"
+
+
+class TestInitialKeywordQueue:
+    """
+    Ordering of the initial keyword queue built by get_initial_keywords.
+
+    The loop consumes keywords_pending front-to-back and can stop on the
+    result-count quota, so branded keywords are front-loaded when the setting
+    is on to guarantee the analyzed/competitor brand shelves are searched
+    before the quota can end the run. Within the generic block, the unbranded
+    terms keep the MOST SPECIFIC → MOST GENERAL order the keyword agent returns
+    (no sort/shuffle), so product-specific shelves fill the quota before it
+    broadens to generic department shelves. Classification bookkeeping is
+    untouched.
+    """
+
+    _UNBRANDED = ["dandruff shampoo", "hair care", "scalp treatment", "shampoo"]
+    _BRANDED = ["head & shoulders shampoo", "ogx shampoo"]
+
+    # An explicitly specific → general unbranded list, mirroring what the
+    # updated keyword-agent prompt asks the LLM to return.
+    _SPECIFIC_TO_GENERAL = [
+        "dandruff shampoo",         # most specific — matches the product name
+        "pyrithione zinc shampoo",
+        "anti-dandruff shampoo",
+        "shampoo",
+        "hair care",
+        "personal care",            # most general — department
+    ]
+
+    @patch("app.agents.keyword_agent.extract_keywords")
+    def test_on_front_loads_branded_before_unbranded(self, mock_extract):
+        from app.agents.keyword_expander import get_initial_keywords
+
+        # extract_keywords returns (all, branded, unbranded, cost); all is
+        # unbranded + branded per the agent contract.
+        mock_extract.return_value = (
+            self._UNBRANDED + self._BRANDED, self._BRANDED, self._UNBRANDED, 0.0
+        )
+        state = _make_state(include_branded=True)
+        get_initial_keywords(state)
+
+        pending = state.keywords_pending
+        # Every branded term precedes every unbranded term in the search queue.
+        max_branded_idx = max(pending.index(kw) for kw in self._BRANDED)
+        min_unbranded_idx = min(pending.index(kw) for kw in self._UNBRANDED)
+        assert max_branded_idx < min_unbranded_idx
+        assert pending == self._BRANDED + self._UNBRANDED
+
+        # Only the queue order changed — the class lists keep content and order.
+        assert state.keywords_branded == self._BRANDED
+        assert state.keywords_unbranded == self._UNBRANDED
+
+    @patch("app.agents.keyword_agent.extract_keywords")
+    def test_off_queues_unbranded_only_in_original_order(self, mock_extract):
+        from app.agents.keyword_expander import get_initial_keywords
+
+        # The agent may still hand back a branded list; with the setting off it
+        # must be dropped and the queue stays unbranded-only in original order.
+        mock_extract.return_value = (
+            self._UNBRANDED + ["head & shoulders shampoo"],
+            ["head & shoulders shampoo"],
+            self._UNBRANDED,
+            0.0,
+        )
+        state = _make_state(include_branded=False)
+        new_kws, _ = get_initial_keywords(state)
+
+        assert new_kws == self._UNBRANDED
+        assert state.keywords_pending == self._UNBRANDED
+        assert state.keywords_branded == []
+        assert state.keywords_unbranded == self._UNBRANDED
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    @patch("app.agents.keyword_agent.extract_keywords")
+    async def test_on_searches_branded_in_first_batch(self, mock_extract, mock_find):
+        """End-to-end: branded terms are searched in the first rule-based batch,
+        ahead of any unbranded term, mirroring the real loop's queue consumption."""
+        from app.agents.keyword_expander import get_initial_keywords
+
+        mock_extract.return_value = (
+            self._UNBRANDED + self._BRANDED, self._BRANDED, self._UNBRANDED, 0.0
+        )
+        mock_find.return_value = []   # only the keyword ordering matters here
+
+        state = _make_state(include_branded=True)
+        get_initial_keywords(state)
+
+        # The rule-based decision searches the front of the queue (batch of 5).
+        action, args = _rule_based_decision(state)
+        assert action == "search"
+        await _call_search(state, args)
+
+        tried = state.keywords_tried
+        assert set(self._BRANDED) <= set(tried)          # both branded searched
+        max_branded_idx = max(tried.index(kw) for kw in self._BRANDED)
+        tried_unbranded = [kw for kw in self._UNBRANDED if kw in tried]
+        assert tried_unbranded                            # some unbranded also tried
+        min_unbranded_idx = min(tried.index(kw) for kw in tried_unbranded)
+        assert max_branded_idx < min_unbranded_idx        # branded before unbranded
+
+    @patch("app.agents.keyword_agent.extract_keywords")
+    def test_unbranded_specificity_order_preserved_on(self, mock_extract):
+        """With the setting ON, the unbranded block keeps the exact specific →
+        general order the agent returned (branded stays front-loaded); the
+        unbranded classification list keeps that order too."""
+        from app.agents.keyword_expander import get_initial_keywords
+
+        mock_extract.return_value = (
+            self._SPECIFIC_TO_GENERAL + self._BRANDED,
+            self._BRANDED,
+            self._SPECIFIC_TO_GENERAL,
+            0.0,
+        )
+        state = _make_state(include_branded=True)
+        get_initial_keywords(state)
+
+        # Whole queue: branded front-loaded, then the untouched specific→general
+        # unbranded list.
+        assert state.keywords_pending == self._BRANDED + self._SPECIFIC_TO_GENERAL
+        # The generic slice of the queue is byte-for-byte the returned order.
+        unbranded_slice = [
+            kw for kw in state.keywords_pending if kw in self._SPECIFIC_TO_GENERAL
+        ]
+        assert unbranded_slice == self._SPECIFIC_TO_GENERAL
+        # Classification preserves the specificity order too (no sort/shuffle).
+        assert state.keywords_unbranded == self._SPECIFIC_TO_GENERAL
+
+    @patch("app.agents.keyword_agent.extract_keywords")
+    def test_unbranded_specificity_order_is_queue_order_off(self, mock_extract):
+        """With the setting OFF, the queue is exactly the unbranded list in
+        specific → general order — no branded terms, no reordering."""
+        from app.agents.keyword_expander import get_initial_keywords
+
+        mock_extract.return_value = (
+            self._SPECIFIC_TO_GENERAL, [], self._SPECIFIC_TO_GENERAL, 0.0
+        )
+        state = _make_state(include_branded=False)
+        new_kws, _ = get_initial_keywords(state)
+
+        assert new_kws == self._SPECIFIC_TO_GENERAL
+        assert state.keywords_pending == self._SPECIFIC_TO_GENERAL
+        assert state.keywords_unbranded == self._SPECIFIC_TO_GENERAL
+        assert state.keywords_branded == []
+
+
+class TestKeywordPromptContract:
+    """
+    The keyword-agent prompt must instruct specific → general ordering for the
+    UNBRANDED list and keep the shelf-realism guardrails, while leaving the
+    branded instructions unchanged (no ordering language attached to branded).
+    """
+
+    def test_unbranded_prompt_orders_specific_to_general_with_guardrails(self):
+        from app.agents.keyword_agent import _build_prompt
+
+        prompt = _build_prompt(
+            brand=BRAND,
+            text_to_analyze="Title: Head & Shoulders Dandruff Shampoo",
+            include_branded=False,
+            user_instructions="",
+        )
+        # Specific → general ordering instruction is present and correctly ordered.
+        assert "MOST SPECIFIC" in prompt
+        assert "MOST GENERAL" in prompt
+        assert prompt.index("MOST SPECIFIC") < prompt.index("MOST GENERAL")
+        # Shelf-realism guardrails retained.
+        assert "1-4 words" in prompt
+        assert "realistic Walmart shelf/category names" in prompt
+        assert "Do NOT generate long product descriptions" in prompt
+
+    def test_branded_instructions_unchanged_and_not_reordered(self):
+        from app.agents.keyword_agent import _build_prompt
+
+        prompt = _build_prompt(
+            brand=BRAND,
+            text_to_analyze="Title: Head & Shoulders Dandruff Shampoo",
+            include_branded=True,
+            user_instructions="",
+        )
+        # Unbranded still gets the ordering instruction...
+        assert "MOST SPECIFIC" in prompt
+        # ...and the branded block is present and left intact.
+        branded_header = (
+            "branded_keywords — 3-5 terms that INCLUDE the brand name "
+            "of this brand and competition brand."
+        )
+        assert branded_header in prompt
+        assert f"'{BRAND} <product type>'" in prompt   # branded format unchanged
+        # All ordering language sits in the unbranded section, before branded —
+        # proving no specific→general instruction was attached to branded terms.
+        assert prompt.rfind("MOST SPECIFIC") < prompt.index(branded_header)
+        assert prompt.rfind("MOST GENERAL") < prompt.index(branded_header)
 
 
 # ---------------------------------------------------------------------------

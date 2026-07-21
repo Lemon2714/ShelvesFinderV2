@@ -616,7 +616,7 @@ def fetch_shelf_sync(
             logger.info(
                 f"[ShelfChecker] Base shelf classified as branded "
                 f"({page_classification.reason}, brand='{page_classification.brand}'): "
-                f"{base_url[:80]}"
+                f"{base_url}"
             )
 
         return {

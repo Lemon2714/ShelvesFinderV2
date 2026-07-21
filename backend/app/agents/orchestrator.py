@@ -181,7 +181,7 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
                     rejected_branded += 1
                     logger.info(
                         f"[Search] Rejected branded shelf ({classification.reason}, "
-                        f"brand='{classification.brand}'): {url[:80]}"
+                        f"brand='{classification.brand}'): {url}"
                     )
                     existing_urls.add(url)
                     continue
@@ -194,7 +194,10 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
                     shelf_brand=classification.brand or "",
                     keyword_type=state.keyword_type_for(kw),
                 ))
-                logger.info(f"[Search] BrowsePage created: keyword='{kw}' position={pos} url={url[:60]}")
+                logger.info(
+                    f"[Search] BrowsePage created: keyword='{kw}' "
+                    f"position={pos} url={url}"
+                )
                 existing_urls.add(url)
 
         # Move searched keywords from pending → tried
@@ -273,7 +276,7 @@ async def _call_evaluate(state: SessionState, args: dict) -> ToolResult:
                 unscored_count += 1
                 logger.warning(
                     f"[Orchestrator] evaluate_and_rank returned no "
-                    f"'{RELEVANCE_SCORE_KEY}' for {url[:80]} — leaving the page "
+                    f"'{RELEVANCE_SCORE_KEY}' for {url} — leaving the page "
                     f"unscored rather than inventing a score"
                 )
                 continue
@@ -379,7 +382,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 invalid_count += 1
                 logger.warning(
                     f"[ShelfCheck] Skipping invalid page (not found on Walmart): "
-                    f"{page.url[:80]}"
+                    f"{page.url}"
                 )
                 continue
 
@@ -387,7 +390,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 unavailable_count += 1
                 logger.warning(
                     f"[ShelfCheck] Skipping unavailable page "
-                    f"({result.reason}): {page.url[:80]}"
+                    f"({result.reason}): {page.url}"
                 )
                 continue
 
@@ -415,7 +418,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                     logger.info(
                         f"[ShelfCheck] Rejected branded shelf post-fetch "
                         f"({result.get('branded_reason')}, "
-                        f"brand='{result.get('shelf_brand')}'): {page.url[:80]}"
+                        f"brand='{result.get('shelf_brand')}'): {page.url}"
                     )
                     continue
 
@@ -446,7 +449,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 f"[ShelfCheck] keyword='{page.keyword}' pos={page.position} "
                 f"brand={brand_found} found={found} page={page_found} "
                 f"visibility={visibility} discoverability={discoverability} "
-                f"sponsored={sponsored} organic={organic} url={page.url[:60]}"
+                f"sponsored={sponsored} organic={organic} url={page.url}"
             )
             sr = ShelfResult(
                 page_url=page.url,
@@ -503,7 +506,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                     logger.info(
                         f"[ShelfCheck] Pruned unchecked branded shelf "
                         f"({classification.reason}, brand='{classification.brand}'): "
-                        f"{pending_page.url[:80]}"
+                        f"{pending_page.url}"
                     )
 
         return ToolResult(

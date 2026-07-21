@@ -160,6 +160,10 @@ def get_initial_keywords(state: SessionState, llm_provider: str | None = None) -
         include_branded=state.include_branded,
         llm_provider=llm_provider,
     )
+    # keyword_agent returns unbranded terms already ordered MOST SPECIFIC →
+    # MOST GENERAL. Preserve that order verbatim end-to-end (no sort/shuffle)
+    # so the quota-based stop fills from product-specific shelves before it
+    # broadens to generic department shelves.
     unbranded_kws = [kw for kw in (unbranded or all_kw) if kw]
     # Branded keywords are queued ONLY when the "Include Branded Results"
     # setting is on; the classification is preserved on the session so the
@@ -174,13 +178,19 @@ def get_initial_keywords(state: SessionState, llm_provider: str | None = None) -
         kw for kw in branded_kws if kw not in state.keywords_branded
     )
 
-    new_keywords = unbranded_kws + branded_kws
+    # Front-load branded keywords so the loop searches them BEFORE the generic
+    # ones. The loop consumes keywords_pending front-to-back and can stop on the
+    # result-count quota, so anything at the back may never be searched; putting
+    # branded terms first ensures the analyzed/competitor brand shelves are
+    # discovered before the quota can end the run. When include_branded is False
+    # branded_kws is [], so this is unbranded-only and the order is unchanged.
+    new_keywords = branded_kws + unbranded_kws
     state.keywords_pending.extend(new_keywords)
     state.record_cost(cost)
 
     logger.info(
         f"[KeywordExpander] Initial keywords ({len(new_keywords)}): "
-        f"{len(unbranded_kws)} generic + {len(branded_kws)} branded "
+        f"{len(branded_kws)} branded + {len(unbranded_kws)} generic "
         f"{new_keywords} | cost=${cost:.6f}"
     )
     return new_keywords, cost
