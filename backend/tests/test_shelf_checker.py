@@ -240,7 +240,7 @@ class TestFetchShelfSync:
             {"usItemId": "other", "isSponsoredFlag": False},
         ])
 
-        # No brand supplied → brand filter can't apply; discoverability == visibility.
+        # No brand supplied → brand-filtered discoverability is unavailable.
         result = fetch_shelf_sync(
             "https://www.walmart.com/browse/clothing/dresses/1",
             HTIGEA_PRODUCT_ID,
@@ -248,17 +248,19 @@ class TestFetchShelfSync:
         )
 
         assert result["visibility"] is False
-        assert result["discoverability"] is False   # falls back to visibility
+        assert result["discoverability"] is None
+        assert result["discoverability_available"] is False
+        assert result["brand_url"] is None
         assert result["organic"] is False
         assert result["brand"] is None
-        assert result["product"] is False
+        assert result["product"] is None
         assert result["page"] == 0
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
-    def test_no_brand_discoverability_equals_visibility(self, mock_get, mock_settings) -> None:
-        # Product present on the (base == brand-less) shelf: visibility True and
-        # discoverability must mirror it exactly when no brand is supplied.
+    def test_no_brand_keeps_visibility_but_discoverability_is_unknown(self, mock_get, mock_settings) -> None:
+        # Product presence on the base shelf remains measurable, but it cannot
+        # stand in for a brand-filtered request that was never made.
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
         mock_get.return_value.text = f"<html>found {HTIGEA_PRODUCT_ID}</html>"
@@ -270,8 +272,8 @@ class TestFetchShelfSync:
         )
 
         assert result["visibility"] is True
-        assert result["discoverability"] == result["visibility"]
-        assert result["organic"] is True
+        assert result["discoverability"] is None
+        assert result["organic"] is False
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
@@ -520,7 +522,7 @@ class TestNegativeEvidenceGuard:
         assert stats["invalid"] == 0
         assert stats["unavailable"] == 1
 
-    async def test_absent_from_loaded_shelf_is_still_missing(self) -> None:
+    async def test_absent_from_loaded_shelf_has_unknown_discoverability_without_brand(self) -> None:
         url = "https://www.walmart.com/browse/beauty/shampoo/3"
         loaded_html = _ranked_next_data_html([
             {"usItemId": "different-product", "isSponsoredFlag": False},
@@ -530,8 +532,11 @@ class TestNegativeEvidenceGuard:
                 [{"url": url}], HTIGEA_PRODUCT_ID, ""
             )
 
-        assert stats["missing"] == 1
-        assert stats["total"] == 1
+        assert stats["missing"] == 0
+        assert stats["total"] == 0
+        assert stats["loaded_total"] == 1
+        assert stats["discoverability_unavailable"] == 1
+        assert stats["score"] is None
         assert stats["invalid"] == 0
         assert stats["unavailable"] == 0
         assert stats["details"][url]["visibility"] is False

@@ -922,6 +922,12 @@ input:checked+.slider:before {
     border-color: #fda29b;
 }
 
+.placement-pill-unavailable {
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+    background: rgba(148, 163, 184, 0.08);
+}
+
 .placement-status-detail {
     min-height: 0.75rem;
     color: var(--text-secondary);
@@ -937,6 +943,15 @@ input:checked+.slider:before {
 
 .placement-detail-absent {
     color: #b42318;
+}
+
+.placement-detail-unavailable {
+    color: var(--text-secondary);
+}
+
+.brand-filter-unavailable {
+    cursor: default;
+    opacity: 0.7;
 }
 
 /* ===================================================================

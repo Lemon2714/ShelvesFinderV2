@@ -112,24 +112,22 @@ async def run_v2_workflow(
 
     try:
         from app.tools.scraper import fetch_product_content
+        from app.tools.product_identity import normalize_product_identity
 
-        product_raw = await asyncio.to_thread(fetch_product_content, url)
+        product_raw = normalize_product_identity(
+            url, await asyncio.to_thread(fetch_product_content, url)
+        )
 
-        # Apply fallback if scraping was blocked
-        if not product_raw.get("title") or "robot or human" in product_raw.get("title", "").lower():
+        if product_raw.get("title_source") == "url_slug":
             yield {"event": "setup_scraping", "status": "warning",
-                   "message": "Anti-bot detected. Falling back to URL slug parsing."}
-            parts = url.rstrip("/").split("/")
-            slug = parts[-2] if len(parts) >= 2 and parts[-2] != "ip" else parts[-1]
-            product_raw["title"] = slug.replace("-", " ").title()
-            product_raw["description"] = ""
-            product_raw["features"] = []
-            product_raw["id"] = product_raw.get("id") or parts[-1].split("?")[0]
-            product_raw["brand"] = product_raw.get("brand") or ""
+                   "message": "Structured product data unavailable; recovered identity from the product URL."}
 
         state.product = ProductInfo(
             title=product_raw.get("title", ""),
             brand=product_raw.get("brand", ""),
+            brand_source=product_raw.get("brand_source", "unknown"),
+            brand_confidence=float(product_raw.get("brand_confidence", 0.0) or 0.0),
+            brand_authoritative=bool(product_raw.get("brand_authoritative", False)),
             product_id=product_raw.get("id", ""),
             description=product_raw.get("description", ""),
             features=product_raw.get("features", []),
@@ -148,6 +146,9 @@ async def run_v2_workflow(
             "data": {
                 "title": state.product.title,
                 "brand": state.product.brand,
+                "brand_source": state.product.brand_source,
+                "brand_confidence": state.product.brand_confidence,
+                "brand_authoritative": state.product.brand_authoritative,
                 "product_id": state.product.product_id,
             },
         }

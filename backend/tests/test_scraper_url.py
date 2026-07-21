@@ -35,8 +35,9 @@ class TestProductIdFromUrl:
         result = fetch_product_content(htigea_dress_url)
 
         assert result["id"] == HTIGEA_PRODUCT_ID
-        assert result["title"] == ""
+        assert result["title"] == HTIGEA_SLUG_TITLE.title()
         assert result["brand"] == ""
+        assert result["brand_source"] == "unknown"
 
     @patch("app.tools.scraper.requests.get")
     @patch("app.tools.scraper.settings")

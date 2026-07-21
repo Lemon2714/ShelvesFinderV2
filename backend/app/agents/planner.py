@@ -1,6 +1,7 @@
 import logging
 import asyncio
-from app.tools.scraper import fetch_product_content, _is_mostly_non_english, _slug_from_url
+from app.tools.scraper import fetch_product_content
+from app.tools.product_identity import normalize_product_identity
 from app.agents.keyword_agent import extract_keywords
 from app.agents.search_agent import find_browse_pages
 from app.agents.evaluation_agent import evaluate_and_rank
@@ -18,29 +19,11 @@ async def stream_plan(url: str, llm_provider: str = ""):
     yield {"step": "scraping", "status": "running", "message": f"Scraping product data from URL..."}
     await asyncio.sleep(0.5) # Slight artificial delay for UI UX 
     
-    product_info = fetch_product_content(url)
+    product_info = normalize_product_identity(url, fetch_product_content(url))
 
-    if not product_info.get("title") or "robot or human" in product_info.get("title", "").lower():
-        yield {"step": "scraping", "status": "warning", "message": "Anti-bot detected. Falling back to URL parsing."}
-        parts = url.rstrip('/').split('/')
-        slug = parts[-2] if len(parts) >= 2 and parts[-2] != "ip" else parts[-1]
-        product_info["title"] = slug.replace('-', ' ').title()
-        product_info["description"] = ""
-        product_info["features"] = []
-        product_info["id"] = product_info.get("id") or parts[-1].split('?')[0]
-        product_info["brand"] = product_info.get("brand") or ""
-
-    # Non-English title guard — same fix as v2
-    if _is_mostly_non_english(product_info.get("title", "")):
-        slug_title = _slug_from_url(url)
-        if slug_title:
-            logger.warning(
-                f"[Scrape Agent] Non-English title detected: '{product_info['title'][:50]}' "
-                f"→ using URL slug: '{slug_title}'"
-            )
-            product_info["title"] = slug_title.title()
-            yield {"step": "scraping", "status": "warning",
-                   "message": f"Non-English title replaced with English slug: '{product_info['title']}'"}
+    if product_info.get("title_source") == "url_slug":
+        yield {"step": "scraping", "status": "warning",
+               "message": "Structured product data unavailable; recovered identity from the product URL."}
 
     yield {"step": "scraping", "status": "complete", "message": f"Found product: '{product_info.get('title')}'"}
     logger.info(f"[Scrape Agent] Successfully scraped - URL: {url} | Title: {product_info.get('title', '')[:30]}... | Brand: {product_info.get('brand', '')}")
@@ -117,27 +100,7 @@ async def stream_plan(url: str, llm_provider: str = ""):
 def execute_plan(url: str) -> dict:
     total_cost = 0.0
     logger.info(f"Phase 1: Scraping {url}")
-    product_info = fetch_product_content(url)
-
-    if not product_info.get("title") or "robot or human" in product_info.get("title", "").lower():
-        logger.warning("Scraping returned no title or was blocked. Proceeding with URL parsing fallback.")
-        parts = url.rstrip('/').split('/')
-        slug = parts[-2] if len(parts) >= 2 and parts[-2] != "ip" else parts[-1]
-        product_info["title"] = slug.replace('-', ' ').title()
-        product_info["description"] = ""
-        product_info["features"] = []
-        product_info["id"] = product_info.get("id") or parts[-1].split('?')[0]
-        product_info["brand"] = product_info.get("brand") or ""
-
-    # Non-English title guard — same fix as v2
-    if _is_mostly_non_english(product_info.get("title", "")):
-        slug_title = _slug_from_url(url)
-        if slug_title:
-            logger.warning(
-                f"[execute_plan] Non-English title detected: '{product_info['title'][:50]}' "
-                f"→ using URL slug: '{slug_title}'"
-            )
-            product_info["title"] = slug_title.title()
+    product_info = normalize_product_identity(url, fetch_product_content(url))
 
     logger.info("Phase 2: Extracting keywords")
     keywords, branded_keywords, unbranded_keywords, k_cost = extract_keywords(product_info)

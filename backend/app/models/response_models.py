@@ -25,6 +25,9 @@ class ScrapeResponse(BaseModel):
     description: str
     features: List[str]
     brand: str = ""
+    brand_source: str = "unknown"
+    brand_confidence: float = 0.0
+    brand_authoritative: bool = False
     id: str = ""
     image: str = ""
     price: str = ""

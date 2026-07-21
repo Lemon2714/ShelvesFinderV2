@@ -860,11 +860,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Embedding relevance the rows are ranked on. Keep null/undefined
                 // distinct from 0 — 0 is "scored, irrelevant", null is "never scored".
                 relevance_score: sr.relevance_score ?? null,
-                found: sr.discoverability ?? sr.product_found ?? sr.found,
+                found: sr.discoverability !== undefined
+                    ? sr.discoverability
+                    : (sr.product_found ?? sr.found),
                 brand_found: sr.brand_found ?? null,
                 // Per-shelf signals so the table columns reflect the right dashboard.
                 visibility: sr.visibility ?? sr.found,
-                discoverability: sr.discoverability ?? sr.brand_found,
+                discoverability: sr.discoverability !== undefined
+                    ? sr.discoverability
+                    : sr.brand_found,
                 organic: sr.organic,
                 sponsored: sr.sponsored,
                 placement_rank: sr.placement_rank ?? firstPlacementRank(sr.placements),
@@ -935,19 +939,26 @@ document.addEventListener('DOMContentLoaded', () => {
     function brandFilterUrl(url, brand) {
         const encodedBrand = brand ? encodeURIComponent(brand) : '';
         const baseUrl = url.split('?')[0];
-        return encodedBrand ? `${baseUrl}?facet=brand%3A${encodedBrand}` : url;
+        return encodedBrand ? `${baseUrl}?facet=brand%3A${encodedBrand}` : null;
     }
 
     // Text-only placement state used only in Recommended Category Pages.
     // Both pills always remain visible so organic and sponsored status can be
     // scanned independently without implying they are mutually exclusive.
     function placementStatusPill(label, state, title, placementRank = null) {
+        const isUnavailable = state === null || state === undefined;
         const isPresent = state === true;
-        const stateClass = isPresent ? 'placement-pill-present' : 'placement-pill-absent';
+        const stateClass = isUnavailable
+            ? 'placement-pill-unavailable'
+            : (isPresent ? 'placement-pill-present' : 'placement-pill-absent');
         const numericRank = Number(placementRank);
         const hasExactRank = isPresent && Number.isInteger(numericRank) && numericRank > 0;
-        const detailText = hasExactRank ? `Rank #${numericRank}` : (isPresent ? 'Found' : 'Not Found');
-        const detailClass = isPresent ? 'placement-detail-present' : 'placement-detail-absent';
+        const detailText = isUnavailable
+            ? 'Unavailable'
+            : (hasExactRank ? `Rank #${numericRank}` : (isPresent ? 'Found' : 'Not Found'));
+        const detailClass = isUnavailable
+            ? 'placement-detail-unavailable'
+            : (isPresent ? 'placement-detail-present' : 'placement-detail-absent');
         return `<span class="placement-status-item">
                     <span class="placement-status-pill ${stateClass}"
                         title="${title}: ${detailText}"
@@ -1056,7 +1067,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (detail && typeof detail === 'object' && 'visibility' in detail) {
                     // v1 payload: check_shelf_visibility details[url].
                     visibility = !!detail.visibility;
-                    discoverability = !!detail.discoverability;
+                    discoverability = detail.discoverability;
                     organic = !!detail.organic;
                     sponsored = !!detail.sponsored;
                     placements = detail.placements;
@@ -1064,7 +1075,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else if (typeof item.visibility === 'boolean') {
                     // v2 payload: per-shelf signals mapped onto the item.
                     visibility = item.visibility;
-                    discoverability = item.discoverability === true;
+                    discoverability = item.discoverability;
                     organic = typeof item.organic === 'boolean'
                         ? item.organic
                         : visibility && discoverability;
@@ -1101,6 +1112,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const discoverabilityHtml = placementStatusPill('Discoverability', discoverability, 'Discoverability on the brand-filtered Digital Shelf');
                 const placementMixHtml = `<div class="placement-mix-statuses">${discoverabilityHtml}${placementStatusPill('Organic', organic, 'Organic placement present', organicPlacementRank)}${placementStatusPill('Sponsored', sponsored, 'Sponsored placement present', sponsoredPlacementRank)}</div>`;
+                const brandShelfHtml = brandUrl
+                    ? `<a href="${brandUrl}" target="_blank" class="url-card recommended-brand-link"><div class="url-info"><span class="url-title">${categoryName} (Brand Filter)</span></div><i data-lucide="external-link"></i></a>`
+                    : `<div class="url-card recommended-brand-link brand-filter-unavailable" title="Product brand could not be established"><div class="url-info"><span class="url-title">Brand Filter Unavailable</span></div></div>`;
 
                 const row = document.createElement('div');
                 row.className = 'recommended-grid recommended-grid-row';
@@ -1108,7 +1122,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="result-keyword-col recommended-keyword-cell"><span class="keyword-badge">${keyword}</span></div>
                     <div class="recommended-rank-cell">${posText}</div>
                     <div class="recommended-relevance-cell">${relText}</div>
-                    <a href="${brandUrl}" target="_blank" class="url-card recommended-brand-link"><div class="url-info"><span class="url-title">${categoryName} (Brand Filter)</span></div><i data-lucide="external-link"></i></a>
+                    ${brandShelfHtml}
                     <a href="${url}" target="_blank" class="url-card recommended-base-link"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
                     <div class="recommended-placement-cell">${placementMixHtml}</div>`;
                 urlsContainer.appendChild(row);
@@ -1123,6 +1137,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // -----------------------------------------------------------------------
     function renderVisibilityDashboard(stats) {
         if (!stats) return;
+        if (stats.score === null || stats.score === undefined) {
+            const unavailable = stats.unavailable ?? stats.discoverability_unavailable ?? stats.loaded_total ?? 0;
+            document.getElementById('dashStatusPill').textContent = 'UNAVAILABLE';
+            document.getElementById('dashStatusPill').className = 'dash-pill';
+            document.getElementById('dashBarMissPct').textContent = '—';
+            document.getElementById('dashBarFoundPct').textContent = '—';
+            document.getElementById('dashFillMiss').style.width = '0%';
+            document.getElementById('dashFillFound').style.width = '0%';
+            document.getElementById('dashTextMiss').textContent = 'Not measured';
+            document.getElementById('dashTextFound').textContent = 'Not measured';
+            document.getElementById('dashBtmMiss').textContent = '—';
+            document.getElementById('dashBtmFound').textContent = '—';
+            document.getElementById('dashBtmTotal').textContent = '0';
+            document.getElementById('dashScoreHuge').textContent = 'N/A';
+            document.getElementById('dashScoreBar').style.width = '0%';
+            document.getElementById('dashRiskLevel').textContent = 'MEASUREMENT UNAVAILABLE';
+            document.getElementById('dashRiskHuge').textContent = 'UNKNOWN';
+            document.getElementById('dashRiskHuge').className = 'dash-risk-huge total';
+            document.getElementById('dashRiskDesc').textContent = 'Product brand could not be established';
+            document.getElementById('dashBannerMsg').textContent = `Brand-filtered discoverability was not measured for ${unavailable} shelf${unavailable === 1 ? '' : 's'}.`;
+            return;
+        }
         const total = stats.total || 1;
         const missPct = ((stats.missing / total) * 100).toFixed(1);
         const foundPct = ((stats.found / total) * 100).toFixed(1);

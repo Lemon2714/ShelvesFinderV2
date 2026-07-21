@@ -354,6 +354,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
         details:          dict = stats.get("details", {})
         invalid_count:    int  = 0
         unavailable_count: int = 0
+        discoverability_unavailable_count: int = 0
         rejected_branded: int  = 0
         found_count:      int  = 0
         missing_count:    int  = 0
@@ -406,11 +407,11 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
 
             # Use the page-1 brand-shelf signal shared with the final dashboard.
             # Deeper shelf pages are never considered found.
-            found = bool(result.get("discoverability"))
+            discoverability = result.get("discoverability")
+            found = discoverability is True
             brand_found = result.get("brand")
             page_found = 1 if found else 0
             visibility = bool(result.get("visibility"))
-            discoverability = bool(result.get("discoverability"))
             placements = [
                 ProductPlacement.from_dict(placement)
                 for placement in result.get("placements", [])
@@ -435,7 +436,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
             )
             sr = ShelfResult(
                 page_url=page.url,
-                product_found=found,
+                product_found=discoverability,
                 keyword_type=page.keyword_type,
                 is_branded_shelf=page.is_branded,
                 brand_found=brand_found,
@@ -451,9 +452,16 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 keyword=page.keyword,
                 position=page.position,
                 relevance_score=page.relevance_score,
-                discovery_index=len(state.found_pages) + len(state.missing_pages),
+                discovery_index=(
+                    len(state.found_pages)
+                    + len(state.missing_pages)
+                    + len(state.unavailable_pages)
+                ),
             )
-            if found:
+            if discoverability is None:
+                discoverability_unavailable_count += 1
+                state.unavailable_pages.append(sr)
+            elif found:
                 found_count += 1
                 state.found_pages.append(sr)
             else:
@@ -491,6 +499,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 "missing": missing_count,
                 "invalid": invalid_count,
                 "unavailable": unavailable_count,
+                "discoverability_unavailable": discoverability_unavailable_count,
                 "rejected_branded": rejected_branded,
                 "pruned_unchecked": pruned_count,
             },
@@ -499,6 +508,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 f"{found_count} found, {missing_count} missing"
                 + (f", {invalid_count} invalid (skipped)" if invalid_count else "")
                 + (f", {unavailable_count} unavailable (skipped)" if unavailable_count else "")
+                + (f", {discoverability_unavailable_count} discoverability unavailable" if discoverability_unavailable_count else "")
                 + (f", {rejected_branded} branded (rejected)" if rejected_branded else "")
                 + (f", {pruned_count} pending branded (pruned)" if pruned_count else "")
             ),

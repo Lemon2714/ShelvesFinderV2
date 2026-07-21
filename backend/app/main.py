@@ -13,7 +13,8 @@ from app.models.response_models import (
 )
 from app.services.workflow import run_analysis_workflow
 from app.agents.planner import stream_plan
-from app.tools.scraper import fetch_product_content, _is_mostly_non_english, _slug_from_url
+from app.tools.scraper import fetch_product_content
+from app.tools.product_identity import normalize_product_identity
 from app.agents.keyword_agent import extract_keywords
 from app.agents.search_agent import find_browse_pages
 from app.agents.evaluation_agent import evaluate_and_rank
@@ -112,22 +113,9 @@ async def analyze_stream(request: Request, url: str, llm_provider: str = ""):
 @app.post("/analyze/step/scrape", response_model=ScrapeResponse)
 async def step_scrape(request: AnalyzeRequest):
     try:
-        product_info = fetch_product_content(request.url)
-        if not product_info.get("title") or "robot or human" in product_info.get("title", "").lower():
-            parts = request.url.rstrip("/").split("/")
-            slug = parts[-2] if len(parts) >= 2 and parts[-2] != "ip" else parts[-1]
-            product_info["title"] = slug.replace("-", " ").title()
-            product_info["description"] = f"Walmart product listing for {product_info['title']}."
-            words = [w for w in product_info["title"].split() if len(w) > 3]
-            product_info["features"] = [f"Product includes: {w}" for w in words[:3]]
-            product_info["id"] = product_info.get("id") or parts[-1].split("?")[0]
-            product_info["brand"] = product_info.get("brand") or ""
-        # Non-English title guard
-        if _is_mostly_non_english(product_info.get("title", "")):
-            slug_title = _slug_from_url(request.url)
-            if slug_title:
-                logger.warning(f"[v1/scrape] Non-English title replaced: '{product_info['title'][:50]}' → '{slug_title}'")
-                product_info["title"] = slug_title.title()
+        product_info = normalize_product_identity(
+            request.url, fetch_product_content(request.url)
+        )
         logger.info(f"[v1/scrape] {product_info.get('title', '')[:40]}")
         return ScrapeResponse(**product_info)
     except Exception as e:

@@ -37,6 +37,9 @@ class ProductInfo:
     """Scraped product data from Walmart PDP."""
     title: str = ""
     brand: str = ""
+    brand_source: str = "unknown"
+    brand_confidence: float = 0.0
+    brand_authoritative: bool = False
     product_id: str = ""
     breadcrumb: str = ""
     description: str = ""
@@ -48,6 +51,9 @@ class ProductInfo:
         return {
             "title": self.title,
             "brand": self.brand,
+            "brand_source": self.brand_source,
+            "brand_confidence": self.brand_confidence,
+            "brand_authoritative": self.brand_authoritative,
             "product_id": self.product_id,
             "breadcrumb": self.breadcrumb,
             "description": self.description,
@@ -88,7 +94,7 @@ class ProductPlacement:
     """One product placement/impression on a checked shelf page."""
     placement_index: int
     visibility: bool
-    discoverability: bool
+    discoverability: Optional[bool]
     sponsored: bool
     organic: bool
     placement_rank: Optional[int] = None
@@ -99,7 +105,11 @@ class ProductPlacement:
         return cls(
             placement_index=int(value.get("placement_index", 0) or 0),
             visibility=bool(value.get("visibility")),
-            discoverability=bool(value.get("discoverability")),
+            discoverability=(
+                bool(value.get("discoverability"))
+                if value.get("discoverability") is not None
+                else None
+            ),
             sponsored=bool(value.get("sponsored")),
             organic=bool(value.get("organic")),
             placement_rank=(
@@ -128,7 +138,7 @@ class ProductPlacement:
 class ShelfResult:
     """Result of checking whether a product appears on a specific shelf/page."""
     page_url: str
-    product_found: bool
+    product_found: Optional[bool]
     page_number_found: int = 0       # 1 when found on the first page; otherwise 0
     confidence: float = 0.0
     checked_at_round: int = 0
@@ -140,7 +150,7 @@ class ShelfResult:
     sponsored: bool = False          # True when any placement on this page is sponsored
     organic: bool = False            # True when any placement on this page is organic
     visibility: bool = False         # product present on the base/general shelf ("Walmart Digital Shelf")
-    discoverability: bool = False    # product present on the brand-filtered shelf ("Digital Shelf (Brand Filter)")
+    discoverability: Optional[bool] = False  # None when no brand-filtered measurement is possible
     placement_rank: Optional[int] = None  # first base-shelf Page 1 product-card rank
     placements: List[ProductPlacement] = field(default_factory=list)
     # Embedding relevance carried from the BrowsePage. None when the page was
@@ -237,6 +247,7 @@ class SessionState:
     # Results
     missing_pages: List[ShelfResult] = field(default_factory=list)
     found_pages: List[ShelfResult] = field(default_factory=list)
+    unavailable_pages: List[ShelfResult] = field(default_factory=list)
 
     # Agent loop control
     round_number: int = 0
@@ -338,7 +349,9 @@ class SessionState:
         count toward the completion target.
         """
         combined = sorted(
-            self._reportable_results(self.found_pages + self.missing_pages),
+            self._reportable_results(
+                self.found_pages + self.missing_pages + self.unavailable_pages
+            ),
             key=lambda sr: sr.discovery_index,
         )
         seen: set = set()
@@ -392,6 +405,7 @@ class SessionState:
             "pages_ranked_unchecked": len(self.unchecked_pages) - len(self.unranked_pages),
             "missing_count": len(self.missing_pages),
             "found_count": len(self.found_pages),
+            "unavailable_count": len(self.unavailable_pages),
             "target_missing": self.target_missing_count,
             "eligible_rows": self.eligible_result_count,
             "recommended_result_count": self.recommended_result_count,
@@ -426,6 +440,7 @@ class SessionState:
                 "organic": sr.organic,
                 "visibility": sr.visibility,           # base shelf → Visibility Dashboard
                 "discoverability": sr.discoverability,  # brand shelf → Discoverability Dashboard
+                "discoverability_available": sr.discoverability is not None,
                 "placement_rank": sr.placement_rank,
                 "placements": [p.to_dict() for p in sr.placements],
                 "page_number": sr.page_number_found,
@@ -442,9 +457,15 @@ class SessionState:
         # Dashboard aggregates. The shared Discoverability Dashboard is driven by
         # Discoverability; visible/discoverable counts expose both signals.
         all_results = selected
-        total_checked = len(all_results)
+        loaded_total = len(all_results)
+        measured_results = [
+            sr for sr in all_results if sr.discoverability is not None
+        ]
+        total_checked = len(measured_results)
         visible_count = sum(1 for sr in all_results if sr.visibility)
-        discoverable_count = sum(1 for sr in all_results if sr.discoverability)
+        discoverable_count = sum(
+            1 for sr in measured_results if sr.discoverability is True
+        )
         placements = [p for sr in all_results for p in sr.placements]
         organic_count = sum(1 for p in placements if p.organic)
         sponsored_count = sum(1 for p in placements if p.sponsored)
@@ -453,6 +474,9 @@ class SessionState:
             "session_id": self.session_id,
             "product_title": self.product.title,
             "product_brand": self.product.brand,
+            "product_brand_source": self.product.brand_source,
+            "product_brand_confidence": self.product.brand_confidence,
+            "product_brand_authoritative": self.product.brand_authoritative,
             "product_id": self.product.product_id,
             "product_image": self.product.image,
             "product_price": self.product.price,
@@ -473,10 +497,14 @@ class SessionState:
             "shelf_results": all_pages,
             "shelf_stats": {
                 "total": total_checked,
+                "loaded_total": loaded_total,
+                "unavailable": loaded_total - total_checked,
                 "found": discoverable_count,           # Discoverability-driven
                 "missing": total_checked - discoverable_count,
-                "score": round(
-                    discoverable_count / max(total_checked, 1) * 100, 1
+                "score": (
+                    round(discoverable_count / total_checked * 100, 1)
+                    if total_checked
+                    else None
                 ),
                 "visible": visible_count,
                 "discoverable": discoverable_count,

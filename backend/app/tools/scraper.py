@@ -1,10 +1,14 @@
 import requests
 from bs4 import BeautifulSoup
 import logging
-import urllib.parse
 import json
 import re
 from app.config import settings
+from app.tools.product_identity import (
+    normalize_product_identity,
+    product_identity_from_url,
+    slug_from_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +51,12 @@ def _extract_from_next_data(html: str) -> dict:
 
         if product:
             result["title"]       = product.get("name", "")
-            result["brand"]       = (product.get("brand", "") or "")
+            raw_brand = product.get("brand", "") or ""
+            result["brand"] = (
+                raw_brand.get("name", "")
+                if isinstance(raw_brand, dict)
+                else str(raw_brand)
+            )
             result["description"] = product.get("shortDescription", "") or product.get("longDescription", "")
             result["id"]          = str(product.get("usItemId", "") or product.get("productId", ""))
 
@@ -131,15 +140,7 @@ def _slug_from_url(url: str) -> str:
     Extract a readable English title from the Walmart /ip/<slug>/<id> URL.
     e.g. /ip/2-Pack-Dr-Dan-s-CORTIBALM-4-20-g/306743072 → '2 Pack Dr Dan s CORTIBALM 4 20 g'
     """
-    try:
-        parts = urllib.parse.urlparse(url).path.strip("/").split("/")
-        # parts = ['ip', 'slug-words-here', '1234567']
-        if len(parts) >= 2:
-            slug = parts[1]  # e.g. '2-Pack-Dr-Dan-s-CORTIBALM-4-20-g'
-            return slug.replace("-", " ").strip()
-    except Exception:
-        pass
-    return ""
+    return slug_from_url(url)
 
 
 def _decode_json_string_token(value: str) -> str:
@@ -201,14 +202,10 @@ def fetch_product_content(url: str) -> dict:
         "price": "",
     }
 
-    # Extract product ID from URL path
-    try:
-        parsed_url = urllib.parse.urlparse(url)
-        path_parts = parsed_url.path.strip("/").split("/")
-        if path_parts:
-            result["id"] = path_parts[-1].split("?")[0]
-    except Exception as e:
-        logger.warning(f"[Scraper] Failed to parse ID from URL: {e}")
+    # Product ID is available even when every fetch path is blocked.
+    _, result["id"] = product_identity_from_url(url)
+    if result["id"]:
+        result["product_id_source"] = "url"
 
     # ------------------------------------------------------------------
     # Fetch HTML
@@ -249,7 +246,7 @@ def fetch_product_content(url: str) -> dict:
 
     except Exception as e:
         logger.error(f"[Scraper] Error fetching {url}: {e}")
-        return result
+        return normalize_product_identity(url, result)
 
     soup = BeautifulSoup(html_content, "html.parser")
 
@@ -263,10 +260,12 @@ def fetch_product_content(url: str) -> dict:
         result["title"] = next_data["title"]
         if next_data.get("brand"):
             result["brand"] = next_data["brand"]
+            result["brand_source"] = "structured_next_data"
         if next_data.get("description"):
             result["description"] = next_data["description"]
         if next_data.get("id"):
             result["id"] = next_data["id"]
+            result["product_id_source"] = "structured_next_data"
         if next_data.get("image"):
             result["image"] = next_data["image"]
         if next_data.get("price"):
@@ -280,6 +279,7 @@ def fetch_product_content(url: str) -> dict:
             logger.info(f"[Scraper] ld+json title: '{result['title'][:60]}'")
         if not result["brand"] and ld.get("brand"):
             result["brand"] = ld["brand"]
+            result["brand_source"] = "structured_ld_json"
         if not result["description"] and ld.get("description"):
             result["description"] = ld["description"]
         if not result["image"] and ld.get("image"):
@@ -361,6 +361,8 @@ def fetch_product_content(url: str) -> dict:
     # ------------------------------------------------------------------
     if not result["brand"]:
         result["brand"] = _extract_brand_fallback(html_content, soup)
+        if result["brand"]:
+            result["brand_source"] = "html_metadata"
 
     # ------------------------------------------------------------------
     # 7. Captcha guard
@@ -374,4 +376,4 @@ def fetch_product_content(url: str) -> dict:
         f"brand='{result['brand']}' id='{result['id']}' "
         f"price='{result['price']}'"
     )
-    return result
+    return normalize_product_identity(url, result)

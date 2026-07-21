@@ -323,8 +323,8 @@ def fetch_shelf_sync(
       * visibility      — product present on the base/general shelf (raw
                           presence; may be driven by sponsored placements).
       * discoverability — product present on the brand-filtered shelf.
-                          When no brand is supplied the brand filter can't apply,
-                          so discoverability falls back to `visibility`.
+                          None when no brand is supplied because a filtered
+                          measurement cannot be made.
       * organic         — True when any discrete placement is both visible
                           and discoverable.
       * sponsored       — True when any discrete placement carries Walmart's
@@ -332,7 +332,8 @@ def fetch_shelf_sync(
 
     Returns:
         {
-            "visibility": bool, "discoverability": bool,
+            "visibility": bool, "discoverability": bool|None,
+            "discoverability_available": bool, "brand_url": str|None,
             "organic": bool, "sponsored": bool,
             "placement_rank": int|None,  # first absolute Page 1 product rank
             "placements": [{"placement_rank": int|None,
@@ -406,12 +407,12 @@ def fetch_shelf_sync(
             if page1_occurrences is not None
             else bool(product_id) and str(product_id) in first_html
         )
-        discoverability = page1_present
+        discoverability = page1_present if brand_applied else None
 
         # The agent and dashboard share the same definition: a product is found
         # only when it appears on page 1 of the brand-filtered shelf.
-        found_page = 1 if page1_present else 0
-        product_present = page1_present
+        found_page = 1 if discoverability is True else 0
+        product_present = discoverability if brand_applied else None
 
         # Visibility — raw presence on the base/general shelf (page 1). When no
         # brand is applied the shelf we already fetched *is* the base shelf.
@@ -452,7 +453,6 @@ def fetch_shelf_sync(
         else:
             base_html = first_html
             visibility = page1_present
-            discoverability = visibility   # no brand filter → falls back to visibility
 
         placements = classify_placements(
             base_html, product_id, visibility, discoverability
@@ -491,6 +491,11 @@ def fetch_shelf_sync(
         return {
             "visibility":      visibility,
             "discoverability": discoverability,
+            "discoverability_available": brand_applied,
+            "discoverability_unavailable_reason": (
+                "product_brand_unknown" if not brand_applied else ""
+            ),
+            "brand_url":       shelf_url if brand_applied else None,
             "organic":         organic,
             "sponsored":       sponsored,
             "placement_rank":  placement_rank,
@@ -535,8 +540,10 @@ async def check_shelf_visibility(
             "missing": int,   # shelves where the product is NOT discoverable
             "invalid": int,   # pages that no longer exist (excluded from score)
             "unavailable": int, # pages without enough evidence (excluded)
-            "total":   int,   # positively loaded pages checked
-            "score":   float, # discoverable / total * 100
+            "total":   int,   # pages with a brand-filtered measurement
+            "loaded_total": int, # positively loaded base pages
+            "discoverability_unavailable": int, # loaded but not measurable
+            "score":   float|None, # discoverable / total * 100
             # Per-signal aggregate counts:
             "visible":      int,  # shelves where the product is visible (base shelf)
             "discoverable": int,  # == found
@@ -544,7 +551,7 @@ async def check_shelf_visibility(
             "organic":      int,  # organic placement/impression count
             "sponsored":    int,  # sponsored placement/impression count
             "organic_pages": int, # page-level compatibility count
-            "details": {url: {"visibility": bool, "discoverability": bool,
+            "details": {url: {"visibility": bool, "discoverability": bool|None,
                               "organic": bool, "sponsored": bool,
                               "placements": list, ...} | None, ...}
         }
@@ -576,6 +583,7 @@ async def check_shelf_visibility(
     details:           dict = {}
     visible_count:     int  = 0
     discoverable_count: int = 0
+    discoverability_unavailable_count: int = 0
     placement_count:   int  = 0
     organic_count:     int  = 0
     sponsored_count:   int  = 0
@@ -594,7 +602,9 @@ async def check_shelf_visibility(
             continue
         if result.get("visibility"):
             visible_count += 1
-        if result.get("discoverability"):
+        if result.get("discoverability") is None:
+            discoverability_unavailable_count += 1
+        elif result.get("discoverability"):
             discoverable_count += 1
         placements = result.get("placements", [])
         placement_count += len(placements)
@@ -605,17 +615,23 @@ async def check_shelf_visibility(
         if result.get("sponsored"):
             sponsored_page_count += 1
 
-    valid_total   = len(outcomes) - invalid_count - unavailable_count
+    loaded_total  = len(outcomes) - invalid_count - unavailable_count
+    valid_total   = loaded_total - discoverability_unavailable_count
     found_count   = discoverable_count              # Discoverability-driven (Discoverability Dashboard)
     missing_count = valid_total - discoverable_count
-    score         = (discoverable_count / valid_total * 100) if valid_total > 0 else 0.0
+    score         = (
+        discoverable_count / valid_total * 100
+        if valid_total > 0
+        else (None if loaded_total > 0 else 0.0)
+    )
 
     logger.info(
         f"[ShelfChecker] Results — visible={visible_count} discoverable={discoverable_count} "
         f"placements={placement_count} organic={organic_count} sponsored={sponsored_count} "
         f"missing={missing_count} invalid={invalid_count} "
         f"unavailable={unavailable_count} "
-        f"total={valid_total} score={score:.1f}%"
+        f"discoverability_unavailable={discoverability_unavailable_count} "
+        f"total={valid_total} score={score if score is not None else 'unknown'}"
     )
 
     return {
@@ -623,8 +639,10 @@ async def check_shelf_visibility(
         "missing":      missing_count,
         "invalid":      invalid_count,
         "unavailable":  unavailable_count,
+        "discoverability_unavailable": discoverability_unavailable_count,
+        "loaded_total": loaded_total,
         "total":        valid_total,
-        "score":        round(score, 1),
+        "score":        round(score, 1) if score is not None else None,
         "visible":      visible_count,
         "discoverable": discoverable_count,
         "placements":   placement_count,
@@ -798,7 +816,7 @@ def classify_placements(
     html: str,
     product_id: str,
     visibility: bool,
-    discoverability: bool,
+    discoverability: Optional[bool],
 ) -> list[dict]:
     """
     Classify every occurrence of a product on one page independently.
@@ -822,14 +840,17 @@ def classify_placements(
         placements = []
         for index, occurrence in enumerate(ranked_occurrences, start=1):
             sponsored = occurrence["sponsored"]
-            placement_discoverability = bool(discoverability and not sponsored)
+            placement_discoverability = (
+                None if discoverability is None
+                else bool(discoverability and not sponsored)
+            )
             placement_visibility = True
             placements.append({
                 "placement_index": index,
                 "placement_rank": occurrence["placement_rank"],
                 "visibility": placement_visibility,
                 "discoverability": placement_discoverability,
-                "organic": placement_visibility and placement_discoverability,
+                "organic": bool(placement_visibility and placement_discoverability),
                 "sponsored": sponsored,
                 "classification_source": "structured",
             })
@@ -839,27 +860,35 @@ def classify_placements(
     if sponsored_flags:
         placements = []
         for index, sponsored in enumerate(sponsored_flags, start=1):
-            placement_discoverability = bool(discoverability and not sponsored)
+            placement_discoverability = (
+                None if discoverability is None
+                else bool(discoverability and not sponsored)
+            )
             placement_visibility = True
             placements.append({
                 "placement_index": index,
                 "placement_rank": None,
                 "visibility": placement_visibility,
                 "discoverability": placement_discoverability,
-                "organic": placement_visibility and placement_discoverability,
+                "organic": bool(placement_visibility and placement_discoverability),
                 "sponsored": sponsored,
                 "classification_source": "structured_unranked",
             })
         return placements
 
-    inferred_discoverability = bool(discoverability)
+    inferred_discoverability = (
+        None if discoverability is None else bool(discoverability)
+    )
     return [{
         "placement_index": 1,
         "placement_rank": None,
         "visibility": True,
         "discoverability": inferred_discoverability,
-        "organic": inferred_discoverability,
-        "sponsored": not inferred_discoverability,
+        "organic": bool(inferred_discoverability),
+        "sponsored": (
+            False if inferred_discoverability is None
+            else not inferred_discoverability
+        ),
         "classification_source": "inferred",
     }]
 
