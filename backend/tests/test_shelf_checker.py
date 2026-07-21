@@ -8,7 +8,9 @@ import pytest
 from app.tools.shelf_checker import (
     FetchResult,
     ShelfUnavailable,
+    _fetch_html,
     _is_page_not_found,
+    _shelf_grid_item_count,
     analyze_placement,
     check_shelf_visibility,
     classify_placements,
@@ -85,9 +87,13 @@ class TestClassifyPlacements:
         )
 
         assert len(placements) == 2
+        # organic/sponsored come from each occurrence's own isSponsoredFlag and
+        # are independent of the shelf's brand-filter discoverability. The
+        # per-placement discoverability field is the shelf-level signal,
+        # attached for reporting only (same for every occurrence).
         assert placements[0]["sponsored"] is True
         assert placements[0]["organic"] is False
-        assert placements[0]["discoverability"] is False
+        assert placements[0]["discoverability"] is True
         assert placements[1]["sponsored"] is False
         assert placements[1]["organic"] is True
         assert placements[1]["visibility"] is True
@@ -273,7 +279,9 @@ class TestFetchShelfSync:
 
         assert result["visibility"] is True
         assert result["discoverability"] is None
-        assert result["organic"] is False
+        # Visible on the base shelf with no sponsored marker → organic. Organic
+        # no longer depends on the (here unmeasured) brand-filter signal.
+        assert result["organic"] is True
 
     @patch("app.tools.shelf_checker.settings")
     @patch("app.tools.shelf_checker.requests.get")
@@ -390,7 +398,9 @@ class TestFetchShelfSync:
         assert result["page"] == 0
         assert result["discoverability"] is False   # not on page 1 of brand shelf
         assert result["visibility"] is True          # present on the base shelf
-        assert result["organic"] is False
+        # Present organically on the base shelf (isSponsoredFlag=false) → organic,
+        # independent of the brand-filter discoverability that came back false.
+        assert result["organic"] is True
         assert mock_get.call_count == 2
         # The second and final request is the base shelf, never page 2.
         second_url = mock_get.call_args_list[1][0][0]
@@ -410,6 +420,223 @@ class TestFetchShelfSync:
         )
 
         assert result is None
+
+
+class TestPresenceFallbackRegression:
+    """
+    A structured result collection that does not contain the product must never
+    override the product's actual presence on the page. These shapes regressed
+    when detection moved from raw-HTML matching to structured-JSON-first, and
+    every prior fixture happened to use usItemId cards, so the gap was invisible.
+    """
+
+    @staticmethod
+    def _searchresult_plus_dom(next_data_items: list, dom_html: str) -> str:
+        """A page whose __NEXT_DATA__ searchResult holds one set of items while
+        the rendered DOM shows another (client-side hydration)."""
+        payload = json.dumps({
+            "props": {"pageProps": {"initialData": {
+                "searchResult": {"itemStacks": [{"items": next_data_items}]}
+            }}}
+        })
+        return (
+            f"<html><body>{dom_html}"
+            f'<script id="__NEXT_DATA__" type="application/json">{payload}</script>'
+            "</body></html>"
+        )
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_client_hydrated_tile_absent_from_ssr_is_still_found(
+        self, mock_get, mock_settings
+    ) -> None:
+        # searchResult present but its itemStacks are empty (hydrated client
+        # side); the product tile is a rendered /ip/<id> anchor in the DOM.
+        mock_settings.webscraping_api_key = ""
+        dom = f'<a href="/ip/Htigea-Dress/{HTIGEA_PRODUCT_ID}">Htigea Dress</a>'
+        page = self._searchresult_plus_dom([], dom)
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = page
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "Htigea",
+        )
+
+        assert result["discoverability"] is True   # brand-filtered shelf
+        assert result["visibility"] is True         # base shelf
+        assert result["product"] is True
+        assert result["page"] == 1
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_item_card_without_usitemid_is_still_found(
+        self, mock_get, mock_settings
+    ) -> None:
+        # Cards carry the id only under "id" (no usItemId/itemId, no
+        # isSponsoredFlag), so the structured matcher yields an empty list.
+        mock_settings.webscraping_api_key = ""
+        page = self._searchresult_plus_dom(
+            [{"id": HTIGEA_PRODUCT_ID, "name": "Htigea Dress"}], ""
+        )
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = page
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "Htigea",
+        )
+
+        assert result["discoverability"] is True
+        assert result["visibility"] is True
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_id_embedded_in_a_longer_number_is_not_a_false_positive(
+        self, mock_get, mock_settings
+    ) -> None:
+        # The target id appears only as a substring of a longer number; the
+        # digit-boundary check must not treat that as presence.
+        mock_settings.webscraping_api_key = ""
+        longer = f"{HTIGEA_PRODUCT_ID}0000"
+        page = self._searchresult_plus_dom(
+            [{"usItemId": longer, "isSponsoredFlag": False}], f"ref {longer}"
+        )
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = page
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "Htigea",
+        )
+
+        assert result["discoverability"] is False
+        assert result["visibility"] is False
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_organic_on_base_shelf_reported_even_when_brand_filter_fails(
+        self, mock_get, mock_settings
+    ) -> None:
+        # The core "sponsored works, organic doesn't" fix: an organic base-shelf
+        # placement must be reported organic even though the brand-filtered
+        # shelf came back without the product (discoverability=False).
+        mock_settings.webscraping_api_key = ""
+        brand_page = MagicMock()
+        brand_page.raise_for_status.return_value = None
+        brand_page.text = _ranked_next_data_html([
+            {"usItemId": "other", "isSponsoredFlag": False},
+        ])
+        base_page = MagicMock()
+        base_page.raise_for_status.return_value = None
+        base_page.text = _ranked_next_data_html([
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+        ])
+        mock_get.side_effect = [brand_page, base_page]
+
+        result = fetch_shelf_sync(
+            "https://www.walmart.com/browse/clothing/dresses/1",
+            HTIGEA_PRODUCT_ID,
+            "Htigea",
+        )
+
+        assert result["visibility"] is True
+        assert result["discoverability"] is False
+        assert result["organic"] is True
+        assert result["sponsored"] is False
+        assert any(p["organic"] for p in result["placements"])
+
+
+class TestFetchHtmlBotMitigationFallback:
+    """
+    WebScrapingAPI's datacenter proxies get a bot-mitigated empty result grid
+    from Walmart even when the shelf carries products; a direct browser request
+    receives the full server-rendered grid. _fetch_html must recover it.
+    """
+
+    def _resp(self, text, status=200):
+        r = MagicMock()
+        r.status_code = status
+        r.raise_for_status.return_value = None
+        r.text = text
+        return r
+
+    def test_grid_count_helper_distinguishes_empty_from_populated(self) -> None:
+        assert _shelf_grid_item_count(_ranked_next_data_html([])) == 0
+        assert _shelf_grid_item_count(_ranked_next_data_html([
+            {"usItemId": "1", "isSponsoredFlag": False},
+            {"usItemId": "2", "isSponsoredFlag": False},
+        ])) == 2
+        assert _shelf_grid_item_count("<html>no next data</html>") is None
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_empty_api_grid_falls_back_to_direct(self, mock_get, mock_settings) -> None:
+        mock_settings.webscraping_api_key = "key"
+        api_empty = self._resp(_ranked_next_data_html([]))
+        direct_full = self._resp(_ranked_next_data_html([
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+        ]))
+        mock_get.side_effect = [api_empty, direct_full]
+
+        result = _fetch_html("https://www.walmart.com/browse/x/1?facet=brand%3AB")
+
+        assert result.path == "direct_fallback"
+        assert HTIGEA_PRODUCT_ID in (result.html or "")
+        assert mock_get.call_count == 2  # API tried first, then direct
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_populated_api_grid_is_used_without_a_direct_request(
+        self, mock_get, mock_settings
+    ) -> None:
+        mock_settings.webscraping_api_key = "key"
+        api_full = self._resp(_ranked_next_data_html([
+            {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+        ]))
+        mock_get.side_effect = [api_full]
+
+        result = _fetch_html("https://www.walmart.com/browse/x/1")
+
+        assert result.path == "api"
+        assert mock_get.call_count == 1  # no wasted direct request
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_keeps_degraded_api_when_direct_also_empty(
+        self, mock_get, mock_settings
+    ) -> None:
+        mock_settings.webscraping_api_key = "key"
+        mock_get.side_effect = [
+            self._resp(_ranked_next_data_html([])),   # API: empty
+            self._resp(_ranked_next_data_html([])),   # direct: also empty
+        ]
+
+        result = _fetch_html("https://www.walmart.com/browse/x/1")
+
+        assert result.path == "api_empty_grid"
+        assert result.loaded
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_uses_degraded_api_when_direct_is_blocked(
+        self, mock_get, mock_settings
+    ) -> None:
+        import requests
+
+        mock_settings.webscraping_api_key = "key"
+        mock_get.side_effect = [
+            self._resp(_ranked_next_data_html([])),        # API: empty grid
+            requests.ConnectionError("blocked by target"),  # direct: blocked
+        ]
+
+        result = _fetch_html("https://www.walmart.com/browse/x/1")
+
+        assert result.path == "api_empty_grid"
+        assert result.loaded
 
 
 class TestCheckShelfVisibility:

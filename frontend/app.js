@@ -1046,12 +1046,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 window.lastDiscoveredData.push({ title: categoryName, url, brandUrl, keyword, position: item?.position || null });
 
-                // Resolve the three visibility signals for this shelf.
+                // Resolve the signals for this shelf. All four are independent
+                // axes and any combination may be true.
                 //   Visibility (including ads) — product on the base/general shelf.
                 //   Discoverability  — product on the brand-filtered shelf (Page 1 / not).
-                //   Organic          — any placement with Visibility AND Discoverability.
-                //   Sponsored        — any placement carrying the sponsored marker.
-                // These page summaries are independent and may both be true.
+                //   Organic          — a base-shelf placement that is not a paid ad
+                //                      (from the card's own isSponsoredFlag; NOT gated
+                //                      on discoverability).
+                //   Sponsored        — a base-shelf placement carrying the sponsored marker.
                 // v1 reads shelf_stats.details[url] with placement summaries;
                 // v2 rows carry booleans on the item, so we derive from those.
                 const detail = data.shelf_stats?.details?.[url];

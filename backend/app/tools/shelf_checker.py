@@ -136,6 +136,28 @@ def _has_next_data_marker(html: str) -> bool:
     return bool(html and '__NEXT_DATA__' in html)
 
 
+def _shelf_grid_item_count(html: str) -> Optional[int]:
+    """
+    Count items in the page's main organic result grid, or None when the page
+    exposes no recognizable result structure at all.
+
+    ``0`` means the grid structure is present but empty — the signature of a
+    bot-mitigated WebScrapingAPI response for a shelf that actually carries
+    products (Walmart serves datacenter/proxy IPs an empty grid). Callers use
+    this to fall back to a direct browser request, which receives the full
+    server-rendered grid.
+    """
+    match = _NEXT_DATA_RE.search(html or "")
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1))
+    except Exception:
+        return None
+    items = _find_ranked_result_items(data)
+    return None if items is None else len(items)
+
+
 def _api_error_is_retryable(exc: Exception) -> bool:
     """Retry immediate provider/rate-limit failures, but not 60-second timeouts."""
     if isinstance(exc, requests.Timeout):
@@ -146,8 +168,20 @@ def _api_error_is_retryable(exc: Exception) -> bool:
 
 
 def _fetch_html(shelf_url: str) -> FetchResult:
-    """Fetch HTML without using an empty string as a failure sentinel."""
+    """
+    Fetch shelf HTML, preferring WebScrapingAPI but falling back to a direct
+    browser request when the API returns a bot-mitigated empty result grid.
+
+    Walmart serves WebScrapingAPI's datacenter/proxy IPs a degraded page whose
+    result grid is empty (``searchResult.count == 0``) even when the shelf
+    really carries products, while a normal browser request from a residential
+    IP receives the full server-rendered grid. So an API response whose grid is
+    demonstrably empty is treated as unusable and re-fetched directly; the
+    empty API response is kept only as a last resort if the direct request is
+    itself blocked.
+    """
     last_api_error = ""
+    api_degraded: Optional[FetchResult] = None
     if settings.webscraping_api_key:
         api_url = "https://api.webscrapingapi.com/v2"
         params = {
@@ -170,19 +204,42 @@ def _fetch_html(shelf_url: str) -> FetchResult:
                 )
                 response.raise_for_status()
                 html = response.text
-                if _has_next_data_marker(html) or _is_page_not_found(html):
+                if _is_page_not_found(html):
                     _log_fetch_observation(
                         shelf_url, "api", response.status_code, html
                     )
                     return FetchResult(html, "api", response.status_code)
-                _log_fetch_observation(
-                    shelf_url, "api_unusable", response.status_code, html
-                )
-                logger.warning(
-                    "[ShelfChecker] WebScrapingAPI returned unstructured HTML "
-                    "for %s. Falling back.",
-                    shelf_url,
-                )
+                grid_count = _shelf_grid_item_count(html)
+                if _has_next_data_marker(html) and grid_count != 0:
+                    # Populated grid, or a structured non-grid page — trust the API.
+                    _log_fetch_observation(
+                        shelf_url, "api", response.status_code, html
+                    )
+                    return FetchResult(html, "api", response.status_code)
+                if grid_count == 0:
+                    # Bot-mitigated: the grid rendered empty though the shelf
+                    # has products. Keep it only as a last resort and try direct.
+                    _log_fetch_observation(
+                        shelf_url, "api_empty_grid", response.status_code, html
+                    )
+                    logger.warning(
+                        "[ShelfChecker] WebScrapingAPI returned an empty result "
+                        "grid for %s (likely bot-mitigated). Trying a direct "
+                        "request.",
+                        shelf_url,
+                    )
+                    api_degraded = FetchResult(
+                        html, "api_empty_grid", response.status_code
+                    )
+                else:
+                    _log_fetch_observation(
+                        shelf_url, "api_unusable", response.status_code, html
+                    )
+                    logger.warning(
+                        "[ShelfChecker] WebScrapingAPI returned unstructured HTML "
+                        "for %s. Falling back.",
+                        shelf_url,
+                    )
                 break
             except Exception as api_err:
                 last_api_error = str(api_err)
@@ -228,8 +285,23 @@ def _fetch_html(shelf_url: str) -> FetchResult:
         _log_fetch_observation(
             shelf_url, "direct_fallback", response.status_code, html
         )
+        # If the direct request itself came back with an empty grid but the API
+        # at least returned a page, keep the API response; otherwise the direct
+        # response (which normally carries the full server-rendered grid) wins.
+        if _shelf_grid_item_count(html) == 0 and api_degraded is not None:
+            return api_degraded
         return FetchResult(html, "direct_fallback", response.status_code)
     except Exception as fetch_err:
+        # Direct request blocked/failed. Prefer the API's (degraded) page over a
+        # total failure so the shelf is still evaluated rather than dropped.
+        if api_degraded is not None:
+            logger.warning(
+                "[ShelfChecker] Direct request failed for %s (%s); using the "
+                "degraded API response.",
+                shelf_url,
+                fetch_err,
+            )
+            return api_degraded
         logger.warning(f"[ShelfChecker] Fetch failed for {shelf_url}: {fetch_err}")
         failure_response = getattr(fetch_err, "response", None)
         status_code = getattr(failure_response, "status_code", None)
@@ -272,6 +344,22 @@ def _has_structured_shelf_content(html: str) -> bool:
     return next(_iter_items(data), None) is not None
 
 
+def _html_shows_product(html: str, product_id: str) -> bool:
+    """
+    Precise raw-HTML presence test for a product on a fetched page.
+
+    This is the fallback the structured parser must never override. A product
+    can be genuinely on the shelf yet absent from the structured result
+    collection we parse — e.g. a client-hydrated product tile (rendered as an
+    ``/ip/<slug>/<id>`` link) or an item card exposing its id under a field the
+    structured matcher does not read. The id is matched only at a digit
+    boundary so it is never mistaken for a substring of a longer number.
+    """
+    if not html or not product_id:
+        return False
+    return re.search(rf"(?<!\d){re.escape(str(product_id))}(?!\d)", html) is not None
+
+
 def _view_has_positive_evidence(
     html: str,
     product_id: str,
@@ -282,7 +370,7 @@ def _view_has_positive_evidence(
     """A negative is trustworthy only when the view demonstrably loaded."""
     if occurrences is not None or _has_structured_shelf_content(html):
         return True
-    if product_id and str(product_id) in html:
+    if _html_shows_product(html, product_id):
         return True
     return allow_explicit_empty and _is_empty_results(html)
 
@@ -325,8 +413,10 @@ def fetch_shelf_sync(
       * discoverability — product present on the brand-filtered shelf.
                           None when no brand is supplied because a filtered
                           measurement cannot be made.
-      * organic         — True when any discrete placement is both visible
-                          and discoverable.
+      * organic         — True when the product has any non-sponsored placement
+                          on the base/general shelf (a real result card that is
+                          not a paid ad). Derived from the base shelf's own
+                          `isSponsoredFlag`; independent of discoverability.
       * sponsored       — True when any discrete placement carries Walmart's
                           sponsored marker. This is independent of `organic`.
 
@@ -402,10 +492,12 @@ def fetch_shelf_sync(
                 shelf_url,
                 "filtered view lacked structured product results",
             )
-        page1_present = (
-            bool(page1_occurrences)
-            if page1_occurrences is not None
-            else bool(product_id) and str(product_id) in first_html
+        # Presence = matched in the structured result collection OR shown in the
+        # raw page HTML. An empty structured match must never override a product
+        # that is actually on the page (client-hydrated tiles, or item cards
+        # whose id fields the structured matcher does not recognize).
+        page1_present = bool(page1_occurrences) or _html_shows_product(
+            first_html, product_id
         )
         discoverability = page1_present if brand_applied else None
 
@@ -445,15 +537,15 @@ def fetch_shelf_sync(
                     base_url,
                     "base view lacked structured product results",
                 )
-            visibility = (
-                bool(base_occurrences)
-                if base_occurrences is not None
-                else bool(product_id) and str(product_id) in base_html
+            visibility = bool(base_occurrences) or _html_shows_product(
+                base_html, product_id
             )
         else:
             base_html = first_html
             visibility = page1_present
 
+        # Organic/sponsored placements are always measured on the base/general
+        # shelf only — never the brand-filtered view.
         placements = classify_placements(
             base_html, product_id, visibility, discoverability
         )
@@ -812,6 +904,33 @@ def _extract_sponsored_flags(html: str, product_id: str) -> list[bool]:
     return flags
 
 
+def _placement(
+    index: int,
+    placement_rank: Optional[int],
+    sponsored: bool,
+    discoverability: Optional[bool],
+    source: str,
+) -> dict:
+    """
+    Build one base-shelf placement record.
+
+    Organic is simply "present on the shelf and not a paid ad" — the direct
+    complement of the occurrence's own ``isSponsoredFlag``. It is never gated on
+    the separate brand-filtered ``discoverability`` signal, which is attached
+    here for reporting only.
+    """
+    sponsored = bool(sponsored)
+    return {
+        "placement_index": index,
+        "placement_rank": placement_rank,
+        "visibility": True,
+        "discoverability": discoverability,
+        "organic": not sponsored,
+        "sponsored": sponsored,
+        "classification_source": source,
+    }
+
+
 def classify_placements(
     html: str,
     product_id: str,
@@ -819,78 +938,48 @@ def classify_placements(
     discoverability: Optional[bool],
 ) -> list[dict]:
     """
-    Classify every occurrence of a product on one page independently.
+    Classify every occurrence of a product on the BASE/normal shelf page.
 
-    Structured Walmart data supplies sponsorship and the absolute Page 1 rank
-    per occurrence. The existing organic rule is evaluated for each placement:
-    `organic = visibility and discoverability`. A sponsored occurrence is not
-    assigned the separate natural-discoverability signal merely because the
-    same product also has an organic occurrence elsewhere on the page.
+    Sponsored vs organic is decided PER OCCURRENCE from Walmart's own
+    ``isSponsoredFlag`` on that occurrence's result card — never from the
+    separate brand-filtered ``discoverability`` signal. A card that is present
+    and not a sponsored ad is an organic placement; a sponsored ad is not. The
+    same product can carry both a sponsored and an organic occurrence on one
+    page, so the caller aggregates the two independently.
 
-    If exact structured result ordering is unavailable, the placement rank is
-    left as ``None``. Legacy occurrence/fallback classification remains
-    reportable without presenting an inferred occurrence index as an exact
-    product-card rank.
+    ``discoverability`` (brand-filtered shelf presence) is attached to each
+    placement for reporting only; it does NOT gate the organic flag.
+
+    When the product is visible but has no structured result card anywhere in
+    the page's ``__NEXT_DATA__`` (e.g. a client-hydrated tile with no
+    ``isSponsoredFlag`` to read), its single placement is treated as organic:
+    absent an explicit sponsored marker we never manufacture a sponsored
+    classification. Placement rank is left ``None`` whenever exact structured
+    ordering is unavailable.
     """
     if not visibility or not product_id:
         return []
 
     ranked_occurrences = _extract_ranked_product_occurrences(html, product_id)
-    if ranked_occurrences is not None:
-        placements = []
-        for index, occurrence in enumerate(ranked_occurrences, start=1):
-            sponsored = occurrence["sponsored"]
-            placement_discoverability = (
-                None if discoverability is None
-                else bool(discoverability and not sponsored)
+    if ranked_occurrences:
+        return [
+            _placement(
+                index, occurrence["placement_rank"], occurrence["sponsored"],
+                discoverability, "structured",
             )
-            placement_visibility = True
-            placements.append({
-                "placement_index": index,
-                "placement_rank": occurrence["placement_rank"],
-                "visibility": placement_visibility,
-                "discoverability": placement_discoverability,
-                "organic": bool(placement_visibility and placement_discoverability),
-                "sponsored": sponsored,
-                "classification_source": "structured",
-            })
-        return placements
+            for index, occurrence in enumerate(ranked_occurrences, start=1)
+        ]
 
     sponsored_flags = _extract_sponsored_flags(html, product_id)
     if sponsored_flags:
-        placements = []
-        for index, sponsored in enumerate(sponsored_flags, start=1):
-            placement_discoverability = (
-                None if discoverability is None
-                else bool(discoverability and not sponsored)
-            )
-            placement_visibility = True
-            placements.append({
-                "placement_index": index,
-                "placement_rank": None,
-                "visibility": placement_visibility,
-                "discoverability": placement_discoverability,
-                "organic": bool(placement_visibility and placement_discoverability),
-                "sponsored": sponsored,
-                "classification_source": "structured_unranked",
-            })
-        return placements
+        return [
+            _placement(index, None, sponsored, discoverability, "structured_unranked")
+            for index, sponsored in enumerate(sponsored_flags, start=1)
+        ]
 
-    inferred_discoverability = (
-        None if discoverability is None else bool(discoverability)
-    )
-    return [{
-        "placement_index": 1,
-        "placement_rank": None,
-        "visibility": True,
-        "discoverability": inferred_discoverability,
-        "organic": bool(inferred_discoverability),
-        "sponsored": (
-            False if inferred_discoverability is None
-            else not inferred_discoverability
-        ),
-        "classification_source": "inferred",
-    }]
+    # Visible, but the product has no structured card to read a flag from
+    # (a client-hydrated tile). Record a single organic-by-default placement.
+    return [_placement(1, None, False, discoverability, "inferred")]
 
 
 def analyze_placement(html: str, product_id: str) -> dict:
@@ -901,14 +990,11 @@ def analyze_placement(html: str, product_id: str) -> dict:
     per-item `isSponsoredFlag`. A product can appear twice (sponsored ad +
     organic listing), so we collect every match for the product id.
 
-    Returns {"organic": bool, "sponsored": bool}. Falls back to a raw
-    substring presence check (counted as organic) when structured data is
-    unavailable.
+    Returns {"organic": bool, "sponsored": bool}. Falls back to a precise
+    presence check (counted as organic) when structured data is unavailable.
     """
-    product_visible = bool(html and product_id and str(product_id) in html)
-    placements = classify_placements(
-        html, product_id, product_visible, product_visible
-    )
+    product_visible = _html_shows_product(html, product_id)
+    placements = classify_placements(html, product_id, product_visible, None)
     return {
         "organic": any(p["organic"] for p in placements),
         "sponsored": any(p["sponsored"] for p in placements),
