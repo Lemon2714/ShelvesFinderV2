@@ -16,9 +16,9 @@ module to reject inherently branded base shelves (for the analyzed brand AND
 competitor brands) before they are checked, reported, persisted, or rendered.
 
 Detection signals, in order of strength:
-  1. Explicit Walmart brand facet/query parameters in the candidate URL
-     (``facet=brand:X`` in any casing/encoding, ``?brand=X``, ``grid_id`` brand
-     facets), which also reveal the brand name for competitor harvesting.
+  1. Explicit Walmart brand facets in candidate query parameters or encoded
+     browse-path tokens (``facet=brand:X``, ``?brand=X``, or Base64-encoded
+     ``brand:X``), which also reveal the brand name for competitor harvesting.
   2. A ``brands`` segment in the URL path (``/browse/brands/...``).
   3. The final category node of the URL path or of the search-result
      title/breadcrumb matching the analyzed product's brand.
@@ -43,8 +43,10 @@ breadcrumb, no brand facet, and no page-type marker remains undetectable.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
@@ -54,6 +56,16 @@ _ID_SEGMENT_RE = re.compile(r"^\d[\d_]*$")
 
 # Trailing site-name suffixes on search-result titles.
 _TITLE_SUFFIX_RE = re.compile(r"\s*[-–|]\s*walmart(\.com)?\s*$", re.IGNORECASE)
+
+
+# Facet values become session metadata and may be logged/reported, so keep the
+# accepted surface deliberately small. 100 characters is comfortably above
+# real-world brand names while bounding malformed search-provider input.
+_MAX_BRAND_LENGTH = 100
+_MAX_ENCODED_FACET_LENGTH = 512
+_UNSAFE_BRAND_CHARS = frozenset('"`<>[]{}\\|')
+_BASE64_SEGMENT_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
+_ENCODED_BRAND_PREFIX_LENGTH = 8  # Base64('brand:') has no variant/padding.
 
 
 def _brand_key(text: str) -> str:
@@ -86,31 +98,174 @@ def _category_segments(url: str) -> list[str]:
     return [seg for seg in segments if not _ID_SEGMENT_RE.match(seg)]
 
 
+def _validated_brand_value(value: str) -> Optional[str]:
+    """Return a safe, plausible brand value or None."""
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip()
+    if not value or len(value) > _MAX_BRAND_LENGTH:
+        return None
+    if not any(char.isalnum() for char in value):
+        return None
+    if any(
+        not char.isprintable()
+        or unicodedata.category(char).startswith("C")
+        or char in _UNSAFE_BRAND_CHARS
+        for char in value
+    ):
+        return None
+    return value
+
+
+def _strict_base64_decode(token: str) -> Optional[bytes]:
+    """Decode one complete standard/URL-safe Base64 token, adding padding."""
+    if len(token) % 4 == 1:
+        return None
+    try:
+        padded = token + ("=" * (-len(token) % 4))
+        return base64.b64decode(padded, altchars=b"-_", validate=True)
+    except (ValueError, TypeError):
+        return None
+
+
+def _brand_from_decoded_facet(decoded: bytes) -> Optional[str]:
+    """Validate a decoded ``brand:<value>`` facet, with narrow noise recovery."""
+    if decoded[:6].lower() != b"brand:":
+        return None
+
+    raw_value = decoded[6:]
+
+    # Walmart can pack multiple facets into one token, for example
+    # ``brand:Head & Shoulders||category:Shampoos``. A real facet delimiter is
+    # an unambiguous end to the brand value, so the remaining facets need not
+    # participate in brand-value validation.
+    delimiter_positions = [
+        position
+        for delimiter in (b"||", b",")
+        if (position := raw_value.find(delimiter)) >= 0
+    ]
+    if delimiter_positions:
+        try:
+            value = raw_value[:min(delimiter_positions)].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return _validated_brand_value(value)
+
+    try:
+        value = raw_value.decode("utf-8")
+    except UnicodeDecodeError:
+        value = ""
+    else:
+        # Printable-but-unsafe suffixes are not silently discarded: doing so
+        # would turn arbitrary partial decodes into fabricated brand names.
+        if all(
+            char.isprintable() and not unicodedata.category(char).startswith("C")
+            for char in value
+        ):
+            return _validated_brand_value(value)
+
+    # A few observed search-result URLs append bytes that decode as control or
+    # invalid UTF-8 data. Recover only the longest complete UTF-8 prefix that
+    # is itself a safe brand value.
+    for end in range(len(raw_value) - 1, 0, -1):
+        try:
+            candidate = raw_value[:end].decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        validated = _validated_brand_value(candidate)
+        if validated:
+            return validated
+    return None
+
+
+def _decode_path_facet_brand(segment: str) -> Optional[str]:
+    """Decode an explicit Base64 ``brand:`` facet from one browse segment."""
+    try:
+        token = urllib.parse.unquote(segment)
+    except Exception:
+        return None
+
+    if not (
+        _ENCODED_BRAND_PREFIX_LENGTH < len(token) <= _MAX_ENCODED_FACET_LENGTH
+        and _BASE64_SEGMENT_RE.fullmatch(token)
+    ):
+        return None
+
+    # Avoid probing arbitrary Base64-looking category slugs. Exactly six bytes
+    # are represented by the first eight characters, so this is a complete,
+    # lossless check for the explicit facet name before recovery is attempted.
+    prefix = _strict_base64_decode(token[:_ENCODED_BRAND_PREFIX_LENGTH])
+    if prefix is None or prefix.lower() != b"brand:":
+        return None
+
+    decoded = _strict_base64_decode(token)
+    if decoded is not None:
+        return _brand_from_decoded_facet(decoded)
+
+    # Valid unpadded Base64 can never have length == 1 mod 4. Walmart/Serper
+    # occasionally appends a short Base64-alphabet suffix, producing exactly
+    # that shape. Remove at most four trailing characters and accept only a
+    # fully decoded, explicitly prefixed, independently validated facet.
+    if "=" not in token and len(token) % 4 == 1:
+        for suffix_length in range(1, 5):
+            candidate = token[:-suffix_length]
+            decoded = _strict_base64_decode(candidate)
+            if decoded is None:
+                continue
+            brand = _brand_from_decoded_facet(decoded)
+            if brand:
+                return brand
+    return None
+
+
+def _path_facet_brand(parsed: urllib.parse.ParseResult) -> Optional[str]:
+    """Inspect Base64 facet tokens on Walmart browse paths only."""
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname != "walmart.com" and not hostname.endswith(".walmart.com"):
+        return None
+
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if not segments or segments[0].lower() != "browse":
+        return None
+
+    for segment in segments[1:]:
+        brand = _decode_path_facet_brand(segment)
+        if brand:
+            return brand
+    return None
+
+
 def extract_facet_brand(url: str) -> Optional[str]:
     """
     Return the brand named by an explicit brand facet/param in ``url``,
     or None when the URL carries no brand facet.
 
-    Handles ``facet=brand:X`` (raw or URL-encoded, any casing) and a direct
-    ``brand=X`` query parameter.
+    Handles ``facet=brand:X`` (raw or URL-encoded, any casing), a direct
+    ``brand=X`` query parameter, and Walmart browse-path segments containing
+    standard or URL-safe Base64-encoded ``brand:X`` facets.
     """
     try:
-        query = urllib.parse.urlparse(url).query
-        params = urllib.parse.parse_qsl(query)
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qsl(parsed.query)
     except Exception:
         return None
 
     for name, value in params:
         name_l = name.lower()
         if name_l == "brand" and value:
-            return value
+            brand = _validated_brand_value(value)
+            if brand:
+                return brand
         if "facet" in name_l and value:
             # A facet value may pack several filters: "brand:X||category:Y"
             for part in re.split(r"\|\||,", value):
                 match = re.match(r"\s*brand\s*:\s*(.+)", part, re.IGNORECASE)
-                if match and match.group(1).strip():
-                    return match.group(1).strip()
-    return None
+                if match:
+                    brand = _validated_brand_value(match.group(1))
+                    if brand:
+                        return brand
+    return _path_facet_brand(parsed)
 
 
 def _clean_title(title: str) -> str:
@@ -387,9 +542,9 @@ def harvest_known_brands(raw_pages: Iterable[dict]) -> set[str]:
     """
     Mine competitor brand names out of a batch of raw search results.
 
-    Currently brands are revealed by explicit brand facets in result URLs;
-    the harvested set lets the classifier reject the *unfaceted* sibling shelf
-    of the same competitor brand.
+    Brands are revealed by explicit query or encoded-path facets in result
+    URLs; the harvested set lets the classifier reject the *unfaceted* sibling
+    shelf of the same competitor brand.
     """
     brands: set[str] = set()
     for rp in raw_pages or ():

@@ -25,6 +25,29 @@ COMPETITOR_FACET_URL = (
 )
 COMPETITOR_BARE_URL = "https://www.walmart.com/browse/beauty/shampoo/ogx/1085666_790"
 
+ENCODED_BRAND_URLS = {
+    "Leader": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/leader/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6TGVhZGVy"
+    ),
+    "DHS": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/dhs/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6REhT"
+    ),
+    "Equate": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/equate/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6RXF1YXRl"
+    ),
+    "Dove": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/dove/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6RG92ZQieie"
+    ),
+    "Vichy": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/vichy/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6VmljaHkie"
+    ),
+}
+
 
 def _make_state(include_branded: bool) -> SessionState:
     state = SessionState(include_branded=include_branded)
@@ -49,6 +72,21 @@ def _search_batch() -> list[dict]:
         {"url": COMPETITOR_BARE_URL, "keyword": "dandruff shampoo", "position": 4,
          "title": "OGX in Shampoo - Walmart.com"},
     ]
+
+
+def _encoded_path_search_batch() -> list[dict]:
+    pages = [
+        {"url": url, "keyword": "dandruff shampoo", "position": position,
+         "title": f"{brand} Dandruff Shampoo - Walmart.com"}
+        for position, (brand, url) in enumerate(ENCODED_BRAND_URLS.items(), 1)
+    ]
+    pages.append({
+        "url": GENERIC_URL,
+        "keyword": "dandruff shampoo",
+        "position": len(pages) + 1,
+        "title": "Dandruff Shampoo - Walmart.com",
+    })
+    return pages
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +179,61 @@ class TestKeywordGeneration:
 # ---------------------------------------------------------------------------
 
 class TestSearchFiltering:
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_off_rejects_encoded_path_facets_before_admission(
+        self, mock_find
+    ):
+        mock_find.return_value = _encoded_path_search_batch()
+        state = _make_state(include_branded=False)
+        state.keywords_pending = ["dandruff shampoo"]
+
+        result = await _call_search(state, {"keywords": ["dandruff shampoo"]})
+
+        assert result.success
+        assert [page.url for page in state.pages_discovered] == [GENERIC_URL]
+        assert result.data["new_pages"] == 1
+        assert result.data["rejected_branded"] == len(ENCODED_BRAND_URLS)
+        assert set(ENCODED_BRAND_URLS) <= state.known_brand_terms
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_on_admits_and_marks_encoded_path_facets(self, mock_find):
+        mock_find.return_value = _encoded_path_search_batch()
+        state = _make_state(include_branded=True)
+        state.keywords_pending = ["dandruff shampoo"]
+
+        result = await _call_search(state, {"keywords": ["dandruff shampoo"]})
+
+        assert result.success
+        assert result.data["new_pages"] == len(ENCODED_BRAND_URLS) + 1
+        assert result.data["rejected_branded"] == 0
+        flags = {page.url: page.is_branded for page in state.pages_discovered}
+        assert flags[GENERIC_URL] is False
+        assert all(flags[url] is True for url in ENCODED_BRAND_URLS.values())
+
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_encoded_facet_brand_classifies_unfaceted_sibling(
+        self, mock_find
+    ):
+        leader_sibling = (
+            "https://www.walmart.com/browse/beauty/dandruff-shampoo/leader/"
+            "1085666_3147628_5752434_2927912_4339403"
+        )
+        mock_find.return_value = [
+            {"url": ENCODED_BRAND_URLS["Leader"], "keyword": "dandruff shampoo",
+             "position": 1, "title": "Leader Dandruff Shampoo - Walmart.com"},
+            {"url": leader_sibling, "keyword": "dandruff shampoo", "position": 2,
+             "title": "Leader in Dandruff Shampoo - Walmart.com"},
+            {"url": GENERIC_URL, "keyword": "dandruff shampoo", "position": 3,
+             "title": "Dandruff Shampoo - Walmart.com"},
+        ]
+        state = _make_state(include_branded=False)
+
+        result = await _call_search(state, {"keywords": ["dandruff shampoo"]})
+
+        assert [page.url for page in state.pages_discovered] == [GENERIC_URL]
+        assert result.data["rejected_branded"] == 2
+        assert "Leader" in state.known_brand_terms
+
     @patch("app.agents.search_agent.find_browse_pages")
     async def test_off_rejects_branded_base_shelves(self, mock_find):
         mock_find.return_value = _search_batch()

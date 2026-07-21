@@ -1,5 +1,6 @@
 """Branded vs generic classification of discovered Walmart browse shelves."""
 
+import base64
 import json
 
 import pytest
@@ -18,12 +19,47 @@ GENERIC_URL = "https://www.walmart.com/browse/beauty/dandruff-shampoo/1085666_10
 PRODUCT_BRAND_URL = "https://www.walmart.com/browse/beauty/shampoo/head-shoulders/1085666_123"
 COMPETITOR_BARE_URL = "https://www.walmart.com/browse/beauty/shampoo/ogx/1085666_790"
 
+ENCODED_BRAND_URLS = {
+    "Leader": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/leader/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6TGVhZGVy"
+    ),
+    "DHS": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/dhs/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6REhT"
+    ),
+    "Equate": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/equate/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6RXF1YXRl"
+    ),
+    "High Supreme": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/high-supreme/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6SGlnaCBTdXByZW1l"
+    ),
+    "Dove": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/dove/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6RG92ZQieie"
+    ),
+    "Vichy": (
+        "https://www.walmart.com/browse/beauty/dandruff-shampoo/vichy/"
+        "1085666_3147628_5752434_2927912_4339403/YnJhbmQ6VmljaHkie"
+    ),
+}
+
 
 class TestGenericShelves:
     def test_generic_category_is_not_branded(self) -> None:
         cls = classify_shelf(GENERIC_URL, product_brand=BRAND,
                              title="Dandruff Shampoo - Walmart.com")
         assert cls.is_branded is False
+
+    def test_generic_dandruff_shelf_without_facet_remains_generic(self) -> None:
+        url = (
+            "https://www.walmart.com/browse/beauty/dandruff-shampoo/"
+            "1085666_3147628_5752434"
+        )
+        assert extract_facet_brand(url) is None
+        assert classify_shelf(url, product_brand=BRAND).is_branded is False
 
     def test_empty_product_brand_does_not_crash(self) -> None:
         cls = classify_shelf(GENERIC_URL, product_brand="", title="")
@@ -73,7 +109,7 @@ class TestGenericShelves:
     def test_brand_substring_in_generic_slug_is_not_branded(self) -> None:
         # Exact-node match only: "dove" ≠ "dove-chocolate-gifts" category.
         cls = classify_shelf(
-            "https://www.walmart.com/browse/food/chocolate-covered-fruit/976759_123",
+            "https://www.walmart.com/browse/food/dove-chocolate-gifts/976759_123",
             product_brand="Dove",
         )
         assert cls.is_branded is False
@@ -122,6 +158,62 @@ class TestCompetitorBrandShelves:
 
 
 class TestBrandFacetUrls:
+    @pytest.mark.parametrize(("brand", "url"), ENCODED_BRAND_URLS.items())
+    def test_encoded_path_brand_facets(self, brand: str, url: str) -> None:
+        assert extract_facet_brand(url) == brand
+        cls = classify_shelf(url, product_brand=BRAND)
+        assert cls.is_branded is True
+        assert cls.reason == "brand_facet"
+        assert cls.brand == brand
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "Y29sb3I6R3JlZW4ie",          # color:Green plus noisy suffix
+            "Y2F0ZWdvcnk6U2hhbXBvb3Mie",  # category:Shampoos plus noise
+        ],
+    )
+    def test_other_encoded_facets_are_not_brands(self, token: str) -> None:
+        url = f"https://www.walmart.com/browse/beauty/shampoo/123/{token}"
+        assert extract_facet_brand(url) is None
+        assert classify_shelf(url, product_brand=BRAND).is_branded is False
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "SGVsbG9Xb3JsZA",            # arbitrary Base64-looking value
+            "not*base64",
+            "YnJhbmQ6",                  # brand: with no value
+            "YnJhbmQ6AA",                # brand: followed only by control data
+            "YnJhbmQ6ImJyb2tlbg",        # unsafe value beginning with a quote
+            "YnJhbmQ6" + ("Q" * 600),   # implausibly long input
+        ],
+    )
+    def test_malformed_or_unsafe_path_tokens_are_ignored(self, token: str) -> None:
+        url = f"https://www.walmart.com/browse/beauty/shampoo/123/{token}"
+        assert extract_facet_brand(url) is None
+
+    def test_path_facet_decoding_is_limited_to_walmart_browse_urls(self) -> None:
+        token = "YnJhbmQ6TGVhZGVy"
+        assert extract_facet_brand(f"https://example.com/browse/x/{token}") is None
+        assert extract_facet_brand(f"https://www.walmart.com/search/x/{token}") is None
+
+    @pytest.mark.parametrize("urlsafe", [False, True])
+    def test_standard_and_urlsafe_base64_are_supported(self, urlsafe: bool) -> None:
+        brand = "X\u00be"
+        encoder = base64.urlsafe_b64encode if urlsafe else base64.b64encode
+        token = encoder(f"brand:{brand}".encode()).decode().rstrip("=")
+        url = f"https://www.walmart.com/browse/beauty/shampoo/123/{token}"
+        assert extract_facet_brand(url) == brand
+
+    def test_encoded_path_token_can_pack_multiple_facets(self) -> None:
+        token = (
+            "YnJhbmQ6SGVhZCAmIFNob3VsZGVyc3x8"
+            "Y2F0ZWdvcnk6U2hhbXBvb3Mie"
+        )
+        url = f"https://www.walmart.com/browse/personal-care/shampoo/123/{token}"
+        assert extract_facet_brand(url) == "Head & Shoulders"
+
     def test_raw_facet_param(self) -> None:
         url = GENERIC_URL + "?facet=brand:OGX"
         cls = classify_shelf(url, product_brand=BRAND)
@@ -288,6 +380,14 @@ class TestHarvestKnownBrands:
             {"url": GENERIC_URL + "?brand=Dove", "position": 3},
         ]
         assert harvest_known_brands(raw) == {"OGX", "Dove"}
+
+    def test_harvests_encoded_path_facet_brands(self) -> None:
+        raw = [
+            {"url": GENERIC_URL, "position": 1},
+            {"url": ENCODED_BRAND_URLS["Leader"], "position": 2},
+            {"url": ENCODED_BRAND_URLS["Dove"], "position": 3},
+        ]
+        assert harvest_known_brands(raw) == {"Leader", "Dove"}
 
     def test_empty_batch(self) -> None:
         assert harvest_known_brands([]) == set()
