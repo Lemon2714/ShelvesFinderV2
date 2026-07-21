@@ -753,8 +753,8 @@ input:checked+.slider:before {
    statuses remain level even when a shelf title wraps. */
 .recommended-grid {
     display: grid;
-    grid-template-columns: minmax(160px, 190px) minmax(96px, 104px) minmax(88px, 96px) minmax(0, 1fr) minmax(0, 1fr) minmax(310px, 340px);
-    column-gap: 0;
+    grid-template-columns: minmax(150px, 180px) minmax(82px, 96px) minmax(150px, 1fr) minmax(150px, 1fr) minmax(285px, 310px);
+    column-gap: 0.75rem;
     min-width: 0;
 }
 
@@ -771,7 +771,7 @@ input:checked+.slider:before {
 
 .recommended-grid-header > div {
     min-width: 0;
-    padding: 0 0.75rem;
+    padding: 0 0.55rem;
 }
 
 .recommended-grid-header > div:first-child {
@@ -792,37 +792,10 @@ input:checked+.slider:before {
     text-align: center;
 }
 
-/* Relevance — the embedding score the report rows are ranked on. Shown so the
-   row ordering is explicable: it no longer follows the Google Rank column. */
-.recommended-relevance-header {
-    text-align: center;
-    white-space: normal;
-}
-
-.recommended-relevance-cell {
-    grid-area: relevance;
-    height: 100%;
-    padding: 0.25rem 0.75rem;
-    border-left: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    text-align: center;
-}
-
-.recommended-relevance-value {
-    font-size: 0.75rem;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-}
-
-.recommended-relevance-value.is-unscored {
-    font-weight: 500;
-    opacity: 0.65;
-}
-
 .recommended-grid-row {
-    grid-template-areas: "keyword rank relevance brand-link base-link placement";
+    grid-template-areas: "keyword rank brand-link base-link placement";
     align-items: center;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.8rem;
 }
 
 .recommended-keyword-cell {
@@ -831,7 +804,7 @@ input:checked+.slider:before {
     min-width: 0;
     height: 100%;
     align-items: center;
-    padding: 0.25rem 0.75rem 0.25rem 0;
+    padding: 0.4rem 0.65rem 0.4rem 0;
     border-right: 0;
 }
 
@@ -841,7 +814,7 @@ input:checked+.slider:before {
     align-items: center;
     justify-content: center;
     height: 100%;
-    padding: 0.25rem 0.75rem;
+    padding: 0.4rem 0.65rem;
     border-left: 1px solid var(--border-color);
     color: var(--text-secondary);
 }
@@ -858,7 +831,7 @@ input:checked+.slider:before {
     min-width: 0;
     margin-bottom: 0;
     height: 100%;
-    padding: 0.35rem 0.75rem;
+    padding: 0.55rem 0.7rem;
     align-items: center;
     border-left: 1px solid var(--border-color);
 }
@@ -871,7 +844,7 @@ input:checked+.slider:before {
     height: 100%;
     min-height: 3rem;
     align-items: center;
-    padding: 0.25rem 0 0.25rem 0.75rem;
+    padding: 0.4rem 0 0.4rem 0.7rem;
     border-left: 1px solid var(--border-color);
 }
 
@@ -1266,17 +1239,11 @@ header {
         grid-template-columns: repeat(2, minmax(0, 1fr));
         grid-template-areas:
             "keyword rank"
-            "relevance relevance"
             "brand-link base-link"
             "placement placement";
+        column-gap: 0.75rem;
+        row-gap: 0.55rem;
         padding: 0.85rem;
-    }
-
-    .recommended-relevance-cell {
-        height: auto;
-        padding: 0.25rem 0 0;
-        border-left: 0;
-        text-align: right;
     }
 
     .recommended-keyword-cell {
@@ -1336,7 +1303,6 @@ header {
         grid-template-columns: minmax(0, 1fr) auto;
         grid-template-areas:
             "keyword rank"
-            "relevance relevance"
             "brand-link brand-link"
             "base-link base-link"
             "placement placement";
@@ -2150,7 +2116,7 @@ a:focus-visible {
 }
 
 .recommended-grid {
-    grid-template-columns: minmax(160px, 190px) minmax(96px, 104px) minmax(88px, 96px) minmax(0, 1fr) minmax(0, 1fr) minmax(310px, 340px);
+    grid-template-columns: minmax(150px, 180px) minmax(82px, 96px) minmax(150px, 1fr) minmax(150px, 1fr) minmax(285px, 310px);
 }
 
 .recommended-grid-header {
@@ -2161,9 +2127,9 @@ a:focus-visible {
 }
 
 .recommended-grid-row {
-    margin-bottom: 0.65rem;
-    min-height: 5.25rem;
-    padding: 0.9rem 1rem;
+    margin-bottom: 0.85rem;
+    min-height: 5.75rem;
+    padding: 1rem 1.1rem;
     background: #f8fafc;
     border: 1px solid #e3e8ef;
     border-radius: 10px;

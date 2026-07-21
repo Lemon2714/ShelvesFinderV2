@@ -1032,7 +1032,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             const hdr = document.createElement('div');
             hdr.className = 'recommended-grid recommended-grid-header';
-            hdr.innerHTML = `<div>Keyword</div><div class="recommended-rank-header" title="Rank within the Google results for this keyword">Google Rank<br>(per keyword)</div><div class="recommended-relevance-header" title="Embedding similarity between the product and this shelf. Rows are ordered by this score, highest first.">Relevance<br>(0-1)</div><div>Digital Shelf (Brand Filter)</div><div>Walmart Digital Shelf</div><div class="recommended-placement-header">Placement Mix</div>`;
+            hdr.innerHTML = `<div>Keyword</div><div class="recommended-rank-header" title="Rank within the Google results for this keyword">Google Rank<br>(per keyword)</div><div>Digital Shelf (Brand Filter)</div><div>Walmart Digital Shelf</div><div class="recommended-placement-header">Placement Mix</div>`;
             urlsContainer.appendChild(hdr);
 
             data.browse_pages.forEach(item => {
@@ -1040,14 +1040,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (typeof url !== 'string') url = String(url);
                 const keyword = typeof item === 'string' ? 'Unknown' : (item.keyword || '');
                 const posText = (item?.position) ? `<span class="recommended-rank-value" title="Google rank #${item.position}">#${item.position}</span>` : '';
-
-                // Relevance explains the row ordering. A score of 0 is a real
-                // measurement (scored, irrelevant) and must still render as
-                // "0.00"; only null/undefined means the shelf was never scored.
-                const rel = item?.relevance_score;
-                const relText = (typeof rel === 'number' && Number.isFinite(rel))
-                    ? `<span class="recommended-relevance-value" title="Embedding similarity to the product: ${rel.toFixed(4)}">${rel.toFixed(2)}</span>`
-                    : `<span class="recommended-relevance-value is-unscored" title="This shelf was not scored for relevance">&mdash;</span>`;
 
                 const categoryName = deriveCategoryName(url);
                 const brandUrl = brandFilterUrl(url, data.product_brand);
@@ -1121,7 +1113,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.innerHTML = `
                     <div class="result-keyword-col recommended-keyword-cell"><span class="keyword-badge">${keyword}</span></div>
                     <div class="recommended-rank-cell">${posText}</div>
-                    <div class="recommended-relevance-cell">${relText}</div>
                     ${brandShelfHtml}
                     <a href="${url}" target="_blank" class="url-card recommended-base-link"><div class="url-info"><span class="url-title">${categoryName}</span></div><i data-lucide="external-link"></i></a>
                     <div class="recommended-placement-cell">${placementMixHtml}</div>`;
