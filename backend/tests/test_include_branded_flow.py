@@ -12,7 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agents.orchestrator import _call_search, _call_check_shelf
+from app.agents.orchestrator import (
+    _call_search,
+    _call_check_shelf,
+    _check_stopping_conditions,
+)
 from app.models.session_state import BrowsePage, ProductInfo, SessionState, ShelfResult
 
 BRAND = "Head & Shoulders"
@@ -709,3 +713,377 @@ class TestSettingTransport:
 
     def test_session_state_default_is_off(self):
         assert SessionState().include_branded is False
+
+
+# ---------------------------------------------------------------------------
+# Diversified final selection when "Include Branded Results" is ON
+# ---------------------------------------------------------------------------
+
+OWN_A = "https://www.walmart.com/browse/beauty/shampoo/head-shoulders/own_a"
+OWN_B = "https://www.walmart.com/browse/beauty/shampoo/head-shoulders/own_b"
+OWN_C = "https://www.walmart.com/browse/beauty/shampoo/head-shoulders/own_c"
+COMP_A = "https://www.walmart.com/browse/beauty/shampoo/ogx/comp_a"
+COMP_B = "https://www.walmart.com/browse/beauty/shampoo/selsun-blue/comp_b"
+GEN_A = "https://www.walmart.com/browse/beauty/shampoo/gen_a"
+GEN_B = "https://www.walmart.com/browse/beauty/shampoo/gen_b"
+GEN_C = "https://www.walmart.com/browse/beauty/shampoo/gen_c"
+GEN_D = "https://www.walmart.com/browse/beauty/shampoo/gen_d"
+
+
+def _sr(url, *, branded=False, shelf_brand="", relevance=None,
+        discovery=0, position=0, keyword_type="generic") -> ShelfResult:
+    return ShelfResult(
+        page_url=url,
+        product_found=True,
+        is_branded_shelf=branded,
+        shelf_brand=shelf_brand,
+        keyword_type=keyword_type,
+        visibility=True,
+        discoverability=True,
+        relevance_score=relevance,
+        discovery_index=discovery,
+        position=position,
+    )
+
+
+def _own(url, relevance, discovery, keyword_type="branded") -> ShelfResult:
+    return _sr(url, branded=True, shelf_brand=BRAND, relevance=relevance,
+               discovery=discovery, keyword_type=keyword_type)
+
+
+def _comp(url, relevance, discovery, brand="OGX", keyword_type="generic") -> ShelfResult:
+    return _sr(url, branded=True, shelf_brand=brand, relevance=relevance,
+               discovery=discovery, keyword_type=keyword_type)
+
+
+def _gen(url, relevance, discovery) -> ShelfResult:
+    return _sr(url, branded=False, shelf_brand="", relevance=relevance,
+               discovery=discovery)
+
+
+class TestDiversifiedSelection:
+    """selected_shelf_results / eligible_result_count with the setting ON."""
+
+    def test_off_preserves_plain_ranking_and_excludes_branded(self):
+        """Toggle off: branded shelves excluded, plain relevance ranking."""
+        state = _make_state(include_branded=False)
+        state.recommended_result_count = 3
+        state.found_pages = [
+            _own(OWN_A, 0.99, 0),
+            _comp(COMP_A, 0.95, 1),
+            _gen(GEN_A, 0.90, 2),
+            _gen(GEN_B, 0.80, 3),
+            _gen(GEN_C, 0.70, 4),
+        ]
+
+        # Branded rows never counted, capped selection is pure relevance order.
+        assert state.eligible_result_count == 3
+        urls = [sr.page_url for sr in state.selected_shelf_results()]
+        assert urls == [GEN_A, GEN_B, GEN_C]
+
+    def test_target_five_one_own_one_competitor_rest_generic(self):
+        """
+        Three high-scoring own-brand shelves, one competitor shelf from a
+        generic keyword, enough generics → exactly five rows, competitor
+        included, only one own-brand shelf.
+        """
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 5
+        state.found_pages = [
+            _own(OWN_A, 0.99, 0),
+            _own(OWN_B, 0.98, 1),
+            _own(OWN_C, 0.97, 2),
+            _comp(COMP_A, 0.60, 3, keyword_type="generic"),  # competitor via generic kw
+            _gen(GEN_A, 0.55, 4),
+            _gen(GEN_B, 0.50, 5),
+            _gen(GEN_C, 0.45, 6),
+            _gen(GEN_D, 0.40, 7),
+        ]
+
+        selected = state.selected_shelf_results()
+        urls = [sr.page_url for sr in selected]
+
+        assert len(selected) == 5
+        assert COMP_A in urls                                   # competitor included
+        own_selected = [sr for sr in selected if sr.page_url in (OWN_A, OWN_B, OWN_C)]
+        assert len(own_selected) == 1                           # only one own-brand
+        assert own_selected[0].page_url == OWN_A                # the best own-brand
+        # Returned in the stable relevance order.
+        assert urls == [OWN_A, COMP_A, GEN_A, GEN_B, GEN_C]
+
+    def test_target_five_second_own_fills_when_only_three_nonown(self):
+        """Only three non-own shelves → a second own-brand fills the fifth
+        slot, but no third own-brand is selected because five is reached."""
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 5
+        state.found_pages = [
+            _own(OWN_A, 0.99, 0),
+            _own(OWN_B, 0.98, 1),
+            _own(OWN_C, 0.97, 2),
+            _comp(COMP_A, 0.60, 3),
+            _gen(GEN_A, 0.55, 4),
+            _gen(GEN_B, 0.50, 5),
+        ]
+
+        selected = state.selected_shelf_results()
+        urls = [sr.page_url for sr in selected]
+
+        assert len(selected) == 5
+        own_selected = [u for u in urls if u in (OWN_A, OWN_B, OWN_C)]
+        assert set(own_selected) == {OWN_A, OWN_B}   # second own admitted
+        assert OWN_C not in urls                      # third own never selected
+        assert {COMP_A, GEN_A, GEN_B} <= set(urls)
+
+    def test_target_five_too_few_nonown_returns_fewer_not_third_own(self):
+        """
+        Search exhausted with too few non-own shelves: the report returns
+        fewer than requested rather than admitting a third own-brand shelf.
+        """
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 5
+        state.found_pages = [
+            _own(OWN_A, 0.99, 0),
+            _own(OWN_B, 0.98, 1),
+            _own(OWN_C, 0.97, 2),
+            _comp(COMP_A, 0.60, 3),
+            _gen(GEN_A, 0.55, 4),
+        ]
+
+        selected = state.selected_shelf_results()
+        urls = [sr.page_url for sr in selected]
+
+        assert len(selected) == 4                     # fewer than the requested 5
+        own_selected = [u for u in urls if u in (OWN_A, OWN_B, OWN_C)]
+        assert set(own_selected) == {OWN_A, OWN_B}    # two own, never a third
+        assert OWN_C not in urls
+        report = state.to_final_report()
+        assert report["recommended_result_count_requested"] == 5
+        assert report["recommended_result_count_returned"] == 4
+
+    def test_all_own_brand_fills_up_to_k_when_only_option(self):
+        """
+        Search-exhaustion clause: when own-brand shelves are the ONLY rows
+        available, they are the sole way to reach K, so up to K own-brand
+        shelves are returned (the two-shelf cap is relaxed only here).
+        """
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 5
+        state.found_pages = [
+            _own(OWN_A, 0.99, 0),
+            _own(OWN_B, 0.98, 1),
+            _own(OWN_C, 0.97, 2),
+            _own(OWN_A + "_d", 0.96, 3),
+            _own(OWN_A + "_e", 0.95, 4),
+            _own(OWN_A + "_f", 0.94, 5),
+        ]
+
+        selected = state.selected_shelf_results()
+        assert len(selected) == 5     # fills K from own-brand, the only option
+        # But the loop-progress count stays capped so it never stops early
+        # while competitor/generic candidates could still be discovered.
+        assert state.eligible_result_count == 2
+
+    def test_competitor_from_generic_keyword_is_competitor_not_own(self):
+        """
+        Ownership is derived from the shelf brand, never from keyword_type: a
+        competitor shelf from a generic keyword is a competitor, and an
+        own-brand shelf from a branded keyword is own.
+        """
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 3
+        own = _own(OWN_A, 0.90, 0, keyword_type="branded")
+        comp = _comp(COMP_A, 0.50, 1, keyword_type="generic")
+        gen1 = _gen(GEN_A, 0.40, 2)
+        gen2 = _gen(GEN_B, 0.30, 3)
+        state.found_pages = [own, comp, gen1, gen2]
+
+        pools_own, pools_comp, pools_gen = state._partition_pools(state.found_pages)
+        assert pools_own == [own]
+        assert pools_comp == [comp]            # generic-keyword competitor here
+        assert pools_gen == [gen1, gen2]
+
+        urls = [sr.page_url for sr in state.selected_shelf_results()]
+        assert COMP_A in urls                  # competitor takes the competitor slot
+        assert urls == [OWN_A, COMP_A, GEN_A]
+
+    @pytest.mark.parametrize("variant", [
+        "Head & Shoulders",
+        "head & shoulders",
+        "HEAD & SHOULDERS",
+        "head-shoulders",
+        "Head%20%26%20Shoulders",   # URL-encoded "Head & Shoulders"
+        "  Head   and   Shoulders  ",
+    ])
+    def test_shelf_brand_match_is_case_insensitive_and_normalized(self, variant):
+        state = _make_state(include_branded=True)
+        own = _sr(OWN_A, branded=True, shelf_brand=variant, relevance=0.9)
+        comp = _comp(COMP_A, 0.8, 1, brand="ogx")   # lower-case competitor stays competitor
+        pools_own, pools_comp, pools_gen = state._partition_pools([own, comp])
+        assert pools_own == [own], f"{variant!r} should match the product brand"
+        assert pools_comp == [comp]
+        assert pools_gen == []
+
+    def test_url_dedup_and_stable_ordering_with_branded_on(self):
+        """Existing URL dedup and stable relevance ordering still hold."""
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 5
+        state.found_pages = [_gen(GEN_A, 0.90, 0)]
+        state.missing_pages = [
+            _gen(GEN_A, 0.50, 1),        # exact duplicate URL
+            _gen(GEN_A + "/", 0.40, 2),  # trailing-slash duplicate
+            _gen(GEN_B, 0.80, 3),
+            _gen(GEN_C, 0.70, 4),
+        ]
+
+        assert state.eligible_result_count == 3           # duplicates collapse
+        urls = [sr.page_url for sr in state.selected_shelf_results()]
+        assert urls == [GEN_A, GEN_B, GEN_C]              # first-seen kept, relevance order
+
+    def test_tie_broken_by_position_then_discovery_with_branded_on(self):
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 3
+        state.found_pages = [
+            _sr(GEN_A, relevance=0.5, discovery=0, position=9),
+            _sr(GEN_B, relevance=0.5, discovery=1, position=2),
+            _sr(GEN_C, relevance=0.5, discovery=2, position=5),
+        ]
+        urls = [sr.page_url for sr in state.selected_shelf_results()]
+        assert urls == [GEN_B, GEN_C, GEN_A]   # equal relevance → position asc
+
+    def test_loop_does_not_stop_early_on_many_own_brand(self):
+        """The loop must not treat a pile of own-brand rows as completion."""
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 5
+        state.found_pages = [
+            _own(OWN_A, 0.99, 0),
+            _own(OWN_B, 0.98, 1),
+            _own(OWN_C, 0.97, 2),
+            _own(OWN_A + "_d", 0.96, 3),
+            _own(OWN_A + "_e", 0.95, 4),
+        ]
+
+        # Own-brand rows count only up to two toward the target.
+        assert state.eligible_result_count == 2
+        should_stop, _ = _check_stopping_conditions(state)
+        assert should_stop is False
+
+        # Once enough competitor/generic rows arrive, the composition completes
+        # (one competitor + four generics leaves a single own-brand slot).
+        state.found_pages += [
+            _comp(COMP_A, 0.65, 5),
+            _gen(GEN_A, 0.55, 6),
+            _gen(GEN_B, 0.50, 7),
+            _gen(GEN_C, 0.45, 8),
+            _gen(GEN_D, 0.40, 9),
+        ]
+        assert state.eligible_result_count == 7           # min(5,2) + 1 comp + 4 gen
+        should_stop, reason = _check_stopping_conditions(state)
+        assert should_stop is True
+        assert reason.startswith("recommended_result_count_reached")
+
+        selected = state.selected_shelf_results()
+        assert len(selected) == 5
+        own_selected = [
+            sr for sr in selected
+            if sr.page_url in (OWN_A, OWN_B, OWN_C, OWN_A + "_d", OWN_A + "_e")
+        ]
+        assert len(own_selected) == 1                     # only the best own-brand
+
+
+class TestDiversifiedIdentityFlow:
+    """Shelf-brand plumbing and check prioritization through the orchestrator."""
+
+    @patch("app.tools.shelf_checker.check_shelf_visibility")
+    @patch("app.agents.search_agent.find_browse_pages")
+    async def test_competitor_from_generic_keyword_flows_to_selection(
+        self, mock_find, mock_check
+    ):
+        # One generic keyword surfaces an own-brand, a competitor (via facet),
+        # and a generic shelf. Ownership must survive to final selection.
+        mock_find.return_value = [
+            {"url": GENERIC_URL, "keyword": "dandruff shampoo", "position": 1,
+             "title": "Dandruff Shampoo - Walmart.com"},
+            {"url": PRODUCT_BRAND_URL, "keyword": "dandruff shampoo", "position": 2,
+             "title": "Head & Shoulders - Walmart.com"},
+            {"url": COMPETITOR_FACET_URL, "keyword": "dandruff shampoo", "position": 3,
+             "title": "Shampoo - Walmart.com"},
+        ]
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 3
+        state.keywords_pending = ["dandruff shampoo"]
+        await _call_search(state, {"keywords": ["dandruff shampoo"]})
+
+        by_url = {p.url: p for p in state.pages_discovered}
+        # Brand carried from the classifier at discovery.
+        assert by_url[PRODUCT_BRAND_URL].shelf_brand == BRAND
+        assert by_url[COMPETITOR_FACET_URL].shelf_brand == "OGX"
+        assert by_url[GENERIC_URL].shelf_brand == ""
+
+        relevance = {GENERIC_URL: 0.5, PRODUCT_BRAND_URL: 0.99, COMPETITOR_FACET_URL: 0.6}
+        for p in state.pages_discovered:
+            p.relevance_score = relevance[p.url]
+
+        async def fake_check(pages, product_id, brand, known_brands=()):
+            # No branded_shelf / shelf_brand keys → the discovery-time brand of
+            # the competitor facet URL (OGX) must be preserved, not wiped.
+            return {
+                "found": len(pages), "missing": 0, "invalid": 0,
+                "details": {
+                    p["url"]: {
+                        "visibility": True, "discoverability": True,
+                        "organic": True, "sponsored": False,
+                        "placement_rank": None, "placements": [],
+                        "brand": True, "product": True, "page": 1,
+                    }
+                    for p in pages
+                },
+            }
+
+        mock_check.side_effect = fake_check
+        await _call_check_shelf(state, {"max_pages": 5})
+
+        pools_own, pools_comp, pools_gen = state._partition_pools(state.found_pages)
+        assert [sr.page_url for sr in pools_own] == [PRODUCT_BRAND_URL]
+        assert [sr.page_url for sr in pools_comp] == [COMPETITOR_FACET_URL]
+        assert [sr.page_url for sr in pools_gen] == [GENERIC_URL]
+
+        report = state.to_final_report()
+        rows = {sr["url"]: sr for sr in report["shelf_results"]}
+        assert set(rows) == {PRODUCT_BRAND_URL, COMPETITOR_FACET_URL, GENERIC_URL}
+        assert rows[COMPETITOR_FACET_URL]["shelf_brand"] == "OGX"
+        assert rows[PRODUCT_BRAND_URL]["shelf_brand"] == BRAND
+        assert rows[GENERIC_URL]["is_branded_shelf"] is False
+
+    @patch("app.tools.shelf_checker.check_shelf_visibility")
+    async def test_nonown_candidate_checked_before_extra_own_brand(self, mock_check):
+        # An own-brand result is already admitted. A higher-ranked own-brand
+        # candidate and a lower-ranked competitor candidate remain unchecked;
+        # only one more may be checked. The competitor must win the fetch.
+        state = _make_state(include_branded=True)
+        state.recommended_result_count = 5
+        state.found_pages = [_own(OWN_A, 0.99, 0)]   # own already represented
+        state.pages_discovered = [
+            BrowsePage(url=OWN_B, keyword="head & shoulders", relevance_score=0.95,
+                       is_branded=True, shelf_brand=BRAND),
+            BrowsePage(url=COMP_A, keyword="dandruff shampoo", relevance_score=0.30,
+                       is_branded=True, shelf_brand="OGX"),
+        ]
+
+        captured = {}
+
+        async def fake_check(pages, product_id, brand, known_brands=()):
+            captured["urls"] = [p["url"] for p in pages]
+            return {"found": 0, "missing": len(pages), "invalid": 0, "details": {
+                p["url"]: {
+                    "visibility": False, "discoverability": False,
+                    "organic": False, "sponsored": False,
+                    "placement_rank": None, "placements": [],
+                    "brand": None, "product": False, "page": 0,
+                } for p in pages}}
+
+        mock_check.side_effect = fake_check
+        await _call_check_shelf(state, {"max_pages": 1})
+
+        # The competitor was fetched first despite its lower relevance, because
+        # the analyzed brand was already represented.
+        assert captured["urls"] == [COMP_A]

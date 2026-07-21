@@ -86,6 +86,10 @@ class BrowsePage:
     checked: bool = False
     title: str = ""            # search-result title/breadcrumb metadata
     is_branded: bool = False   # inherently brand-specific shelf (classifier)
+    # Brand this shelf belongs to when it is branded, "" when generic/unknown.
+    # Set from the classifier at discovery and refined post-fetch; lets
+    # selection tell the product's OWN brand apart from a competitor's.
+    shelf_brand: str = ""
     keyword_type: str = "generic"  # "generic" | "branded" — origin keyword class
 
 
@@ -145,6 +149,10 @@ class ShelfResult:
     keyword: str = ""                # search keyword that discovered this page
     keyword_type: str = "generic"    # "generic" | "branded" — origin keyword class
     is_branded_shelf: bool = False   # inherently brand-specific base shelf
+    # Brand this shelf belongs to when it is branded, "" when generic/unknown.
+    # Carried from the BrowsePage; drives own-brand vs competitor grouping in
+    # the diversified final selection. Never derived from keyword_type.
+    shelf_brand: str = ""
     position: int = 0                # rank position in search results
     brand_found: Optional[bool] = None  # True/False if brand carried on shelf; None if not evaluated
     sponsored: bool = False          # True when any placement on this page is sponsored
@@ -364,28 +372,194 @@ class SessionState:
             unique.append(sr)
         return unique
 
+    def _stable_rank_key(self, sr: ShelfResult):
+        """
+        The canonical stable ranking key for a row, best first.
+
+        relevance score desc, then search position asc, then discovery order,
+        then URL. Shared by the plain and diversified selection paths and by
+        the within-pool ordering so tie-breaking has a single definition.
+        """
+        return (
+            relevance_sort_key(sr.relevance_score),
+            sr.position if sr.position and sr.position > 0 else float("inf"),
+            sr.discovery_index,
+            self._normalize_result_url(sr.page_url),
+        )
+
+    def _partition_pools(
+        self, results: List[ShelfResult]
+    ) -> Tuple[List[ShelfResult], List[ShelfResult], List[ShelfResult]]:
+        """
+        Split rows into (own-brand, competitor-branded, generic) pools.
+
+        Ownership is decided purely from ``is_branded_shelf`` and the shelf's
+        own ``shelf_brand`` compared to ``product.brand`` under the classifier's
+        brand normalization — never from ``keyword_type`` (a competitor shelf
+        can arrive from a generic keyword, and a generic shelf from a branded
+        one). A branded shelf whose brand is unknown or does not match the
+        product brand is treated as competitor (i.e. "not our own brand"), so
+        it can never consume an own-brand slot. Input order is preserved, so
+        passing pre-ranked rows yields pre-ranked pools.
+        """
+        from app.tools.shelf_classifier import normalize_brand
+
+        product_key = normalize_brand(self.product.brand)
+        own: List[ShelfResult] = []
+        competitor: List[ShelfResult] = []
+        generic: List[ShelfResult] = []
+        for sr in results:
+            if not sr.is_branded_shelf:
+                generic.append(sr)
+                continue
+            shelf_key = normalize_brand(getattr(sr, "shelf_brand", "") or "")
+            if product_key and shelf_key and shelf_key == product_key:
+                own.append(sr)
+            else:
+                competitor.append(sr)
+        return own, competitor, generic
+
     @property
     def eligible_result_count(self) -> int:
-        """Count of final category-page rows collected so far (uncapped)."""
-        return len(self._unique_shelf_results())
+        """
+        Count of final category-page rows collected so far, toward the target.
+
+        With Include Branded Results OFF this is simply the number of unique
+        eligible rows (unchanged). With it ON the count reflects the diversified
+        composition cap: own-brand rows count only up to two, so a pile of
+        highly ranked own-brand shelves can never make the loop believe the
+        requested composition is satisfied. Competitor and generic rows count
+        in full. (The search-exhaustion fallback that fills K entirely from
+        own-brand shelves lives in selection, not here, so the loop keeps
+        looking for non-own shelves rather than stopping early.)
+        """
+        unique = self._unique_shelf_results()
+        if not self.include_branded:
+            return len(unique)
+        own, competitor, generic = self._partition_pools(unique)
+        return min(len(own), 2) + len(competitor) + len(generic)
 
     def selected_shelf_results(self) -> List[ShelfResult]:
         """
         The rows that make up the final report, capped at
         recommended_result_count. When more eligible rows exist than
-        requested, the best rows win under a stable ordering:
-        relevance score desc, search position asc, discovery order, URL.
+        requested, the best rows win under the stable ordering (relevance
+        score desc, search position asc, discovery order, URL).
+
+        With Include Branded Results ON the selection is diversified so that
+        highly ranked shelves of the analyzed product's OWN brand cannot crowd
+        out competitor and generic shelves (see ``_diversified_selection``).
+        With it OFF the behavior is exactly as before: rank all eligible rows
+        and take the top K.
         """
-        ranked = sorted(
-            self._unique_shelf_results(),
-            key=lambda sr: (
-                relevance_sort_key(sr.relevance_score),
-                sr.position if sr.position and sr.position > 0 else float("inf"),
-                sr.discovery_index,
-                self._normalize_result_url(sr.page_url),
-            ),
-        )
-        return ranked[: max(self.recommended_result_count, 0)]
+        ranked = sorted(self._unique_shelf_results(), key=self._stable_rank_key)
+        k = max(self.recommended_result_count, 0)
+        if not self.include_branded:
+            return ranked[:k]
+        return self._diversified_selection(ranked, k)
+
+    def _diversified_selection(
+        self, ranked: List[ShelfResult], k: int
+    ) -> List[ShelfResult]:
+        """
+        Compose K rows that guarantee brand diversity, then return them in the
+        stable ranking order.
+
+        Given the eligible rows already sorted by ``_stable_rank_key`` (so each
+        derived pool is internally ranked), the policy for a requested count K:
+
+          1. Include the best own-brand shelf, if any (guaranteed representation
+             of the analyzed brand).
+          2. Include the best competitor-branded shelf, if any.
+          3. Fill the remaining slots from the highest-ranked competitor and
+             generic shelves combined.
+          4. Only if competitor + generic shelves cannot fill K, admit a second
+             own-brand shelf.
+          5. Never return more than two own-brand shelves.
+
+        The single exception to the two-own cap: when the eligible set contains
+        *nothing but* own-brand shelves, they are the only way to reach K, so up
+        to K own-brand shelves are returned (the search-exhaustion clause). When
+        any competitor or generic shelf exists, the cap holds and the report
+        simply returns fewer than K rather than a third own-brand shelf.
+
+        The composed set is returned re-sorted by the stable ranking key.
+        """
+        if k <= 0:
+            return []
+
+        own, competitor, generic = self._partition_pools(ranked)
+
+        # Degenerate case: own-brand shelves are the only rows available, so the
+        # only way to fulfill K is with own-brand shelves. Fill up to K from
+        # them (this is the sole path that may return more than two).
+        if not competitor and not generic:
+            return own[:k]
+
+        selected: List[ShelfResult] = []
+        seen: set = set()
+
+        def admit(sr: ShelfResult) -> None:
+            key = self._normalize_result_url(sr.page_url)
+            if key in seen or len(selected) >= k:
+                return
+            seen.add(key)
+            selected.append(sr)
+
+        # 1. Best own-brand shelf (representation), 2. best competitor shelf.
+        if own:
+            admit(own[0])
+        if competitor:
+            admit(competitor[0])
+
+        # 3. Fill remaining slots with the highest-ranked non-own shelves.
+        non_own = sorted(competitor + generic, key=self._stable_rank_key)
+        for sr in non_own:
+            if len(selected) >= k:
+                break
+            admit(sr)
+
+        # 4. Only when non-own shelves cannot fill K, admit a second own-brand
+        #    shelf — never a third while any non-own shelf exists.
+        if len(selected) < k and len(own) >= 2:
+            admit(own[1])
+
+        selected.sort(key=self._stable_rank_key)
+        return selected
+
+    def _prioritize_check_candidates(
+        self, candidates: List[BrowsePage]
+    ) -> List[BrowsePage]:
+        """
+        Reorder ranked unchecked candidates so competitor/generic shelves are
+        checked before additional own-brand shelves.
+
+        Only reorders when Include Branded Results is ON and at least one
+        own-brand result has already been admitted; the analyzed brand is then
+        already represented, so a discovered competitor-branded candidate must
+        not be starved of a fetch merely because higher-ranked own-brand
+        shelves would otherwise fill the batch first. Relevance order is
+        preserved within each group.
+        """
+        if not self.include_branded:
+            return candidates
+        own_admitted, _, _ = self._partition_pools(self._unique_shelf_results())
+        if not own_admitted:
+            return candidates
+
+        from app.tools.shelf_classifier import normalize_brand
+
+        product_key = normalize_brand(self.product.brand)
+
+        def is_own(page: BrowsePage) -> bool:
+            if not getattr(page, "is_branded", False):
+                return False
+            shelf_key = normalize_brand(getattr(page, "shelf_brand", "") or "")
+            return bool(product_key and shelf_key and shelf_key == product_key)
+
+        non_own = [p for p in candidates if not is_own(p)]
+        own = [p for p in candidates if is_own(p)]
+        return non_own + own
 
     def to_summary_dict(self) -> dict:
         """Compact snapshot sent to LLM each iteration."""
@@ -448,6 +622,7 @@ class SessionState:
                 "keyword": sr.keyword,
                 "keyword_type": sr.keyword_type,
                 "is_branded_shelf": sr.is_branded_shelf,
+                "shelf_brand": sr.shelf_brand,
                 "position": sr.position,
                 # Embedding relevance this row was ranked on. null = never
                 # scored. Surfaced so the ordering above is inspectable.

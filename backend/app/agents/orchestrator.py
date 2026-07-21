@@ -189,6 +189,9 @@ async def _call_search(state: SessionState, args: dict) -> ToolResult:
                 new_pages.append(BrowsePage(
                     url=url, keyword=kw, position=pos, title=title,
                     is_branded=classification.is_branded,
+                    # Carry the discovered brand so own-brand vs competitor can
+                    # be told apart later; refined post-fetch in check_shelf.
+                    shelf_brand=classification.brand or "",
                     keyword_type=state.keyword_type_for(kw),
                 ))
                 logger.info(f"[Search] BrowsePage created: keyword='{kw}' position={pos} url={url[:60]}")
@@ -333,10 +336,15 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
     max_pages = max(1, min(requested, 10))
 
     # Pick top-ranked unchecked pages — best relevance first, unscored last.
-    candidates = sorted(
+    # With Include Branded Results on, once the analyzed brand is already
+    # represented, non-own candidates are checked ahead of further own-brand
+    # ones so a discovered competitor shelf is not left unchecked merely
+    # because higher-ranked own-brand shelves would fill the batch first.
+    ranked_unchecked = sorted(
         state.unchecked_pages,
         key=lambda p: relevance_sort_key(p.relevance_score),
-    )[:max_pages]
+    )
+    candidates = state._prioritize_check_candidates(ranked_unchecked)[:max_pages]
 
     if not candidates:
         return ToolResult(success=True, message="No unchecked pages available", data={})
@@ -390,6 +398,12 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
             )
             if result.get("shelf_brand"):
                 state.known_brand_terms.add(result["shelf_brand"])
+                # Refine the shelf's brand with the checker's post-fetch value
+                # (a name mined from the page's own structured data). Only
+                # overwrite when non-empty so a brand already established at
+                # discovery — e.g. a competitor facet URL whose stripped base
+                # page reads as generic — is never wiped.
+                page.shelf_brand = result["shelf_brand"]
 
             # Post-fetch verification: the page's own __NEXT_DATA__ proved the
             # base shelf is inherently branded (catches brands the pre-fetch
@@ -439,6 +453,7 @@ async def _call_check_shelf(state: SessionState, args: dict) -> ToolResult:
                 product_found=discoverability,
                 keyword_type=page.keyword_type,
                 is_branded_shelf=page.is_branded,
+                shelf_brand=page.shelf_brand,
                 brand_found=brand_found,
                 page_number_found=page_found,
                 sponsored=sponsored,

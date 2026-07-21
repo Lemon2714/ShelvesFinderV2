@@ -42,6 +42,15 @@ ShelfCheckResult = Union[dict, ShelfUnavailable, None]
 _API_MAX_ATTEMPTS = 2
 _API_RETRY_BACKOFF_SECONDS = 0.5
 
+# Minimum number of structured product cards a base/general shelf must carry to
+# be treated as a usable result. A base shelf whose concrete, positive product
+# count is below this is considered too thin (low quality) and is skipped
+# (returned as ShelfUnavailable) exactly like an unavailable shelf: excluded
+# from the found/missing counts and the report, never consuming a Recommended
+# Category Pages slot, and never counted toward the completion target, while the
+# loop keeps searching to backfill. Tunable threshold.
+MIN_GENERAL_SHELF_PRODUCT_COUNT = 3
+
 # ---------------------------------------------------------------------------
 # Walmart "page not found" detection
 # ---------------------------------------------------------------------------
@@ -541,8 +550,38 @@ def fetch_shelf_sync(
                 base_html, product_id
             )
         else:
+            # No brand applied — the shelf we already fetched *is* the base view.
+            base_fetch = first_fetch
             base_html = first_html
             visibility = page1_present
+
+        # --- Skip a base/general shelf that is too thin to be useful. ---
+        # Measured on the BASE/GENERAL view only (never the brand-filtered view,
+        # where a facet legitimately returns few items). Only a concrete,
+        # positive structured product count gates the shelf: an UNKNOWN count
+        # (no trustworthy grid — ``_shelf_grid_item_count`` is None) or an empty
+        # grid (0 — the client-hydration / bot-mitigation signature, never a
+        # reliable "0 products") is treated as unknown and kept, as is any known
+        # degraded API grid (``api_empty_grid``). This keeps a degraded scrape
+        # from being misread as a genuinely sparse shelf.
+        base_product_count = _shelf_grid_item_count(base_html)
+        if (
+            base_product_count is not None
+            and 0 < base_product_count < MIN_GENERAL_SHELF_PRODUCT_COUNT
+            and base_fetch.path != "api_empty_grid"
+        ):
+            logger.info(
+                "[ShelfChecker] Skipping sparse general shelf "
+                "(%d < %d products): %s",
+                base_product_count,
+                MIN_GENERAL_SHELF_PRODUCT_COUNT,
+                base_url,
+            )
+            return _unavailable_from_fetch(
+                base_fetch,
+                base_url,
+                f"sparse general shelf: only {base_product_count} products",
+            )
 
         # Organic/sponsored placements are always measured on the base/general
         # shelf only — never the brand-filtered view.

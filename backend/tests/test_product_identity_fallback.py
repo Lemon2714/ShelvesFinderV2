@@ -97,8 +97,11 @@ async def test_v2_product_state_uses_shared_recovered_identity() -> None:
 def test_recovered_brand_builds_real_filtered_shelf_url() -> None:
     product = normalize_product_identity(PRODUCT_URL, {})
     fetched_urls = []
+    # Well-stocked shelf (>= the sparse-shelf minimum) carrying the product.
     filtered_html = _ranked_html([
-        {"usItemId": PRODUCT_ID, "isSponsoredFlag": False}
+        {"usItemId": PRODUCT_ID, "isSponsoredFlag": False},
+        {"usItemId": "other-1", "isSponsoredFlag": False},
+        {"usItemId": "other-2", "isSponsoredFlag": False},
     ])
 
     def fake_fetch(url: str) -> str:
@@ -140,7 +143,9 @@ async def test_unknown_brand_excludes_discoverability_from_score() -> None:
     assert product["brand"] == ""
 
     base_html = _ranked_html([
-        {"usItemId": "999", "isSponsoredFlag": False}
+        {"usItemId": "999", "isSponsoredFlag": False},
+        {"usItemId": "other-1", "isSponsoredFlag": False},
+        {"usItemId": "other-2", "isSponsoredFlag": False},
     ])
     with patch("app.tools.shelf_checker._fetch_html", return_value=base_html):
         stats = await check_shelf_visibility(

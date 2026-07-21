@@ -68,11 +68,21 @@ class TestExamplePipelineMocked:
                 "pageProps": {
                     "initialData": {
                         "searchResult": {
+                            # Well-stocked base shelf (>= the sparse-shelf
+                            # minimum) that does not carry our product.
                             "items": [
                                 {
                                     "usItemId": "different-product",
                                     "isSponsoredFlag": False,
-                                }
+                                },
+                                {
+                                    "usItemId": "different-product-2",
+                                    "isSponsoredFlag": False,
+                                },
+                                {
+                                    "usItemId": "different-product-3",
+                                    "isSponsoredFlag": False,
+                                },
                             ]
                         }
                     }

@@ -86,6 +86,18 @@ def _brand_key(text: str) -> str:
     return " ".join(tokens)
 
 
+def normalize_brand(text: str) -> str:
+    """
+    Public brand-comparison normalizer, shared with final-row selection.
+
+    Delegates to the classifier's own ``_brand_key`` so that grouping shelves
+    by brand (own-brand vs competitor) uses the exact same case/punctuation/
+    URL-encoding-insensitive semantics the classifier uses to detect brands.
+    Two brand strings are "the same brand" iff their normalized keys are equal.
+    """
+    return _brand_key(text)
+
+
 def _category_segments(url: str) -> list[str]:
     """Return the category path segments of a browse URL, IDs stripped."""
     try:

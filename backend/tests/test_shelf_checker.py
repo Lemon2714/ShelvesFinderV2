@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.tools.shelf_checker import (
+    MIN_GENERAL_SHELF_PRODUCT_COUNT,
     FetchResult,
     ShelfUnavailable,
     _fetch_html,
@@ -242,8 +243,12 @@ class TestFetchShelfSync:
     def test_missing_everywhere_no_brand(self, mock_get, mock_settings) -> None:
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
+        # A well-stocked base shelf (>= the sparse-shelf minimum) that simply
+        # does not carry our product ID.
         mock_get.return_value.text = _ranked_next_data_html([
-            {"usItemId": "other", "isSponsoredFlag": False},
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "other-2", "isSponsoredFlag": False},
+            {"usItemId": "other-3", "isSponsoredFlag": False},
         ])
 
         # No brand supplied → brand-filtered discoverability is unavailable.
@@ -288,9 +293,12 @@ class TestFetchShelfSync:
     def test_brand_present_but_product_missing(self, mock_get, mock_settings) -> None:
         mock_settings.webscraping_api_key = ""
         mock_get.return_value.raise_for_status.return_value = None
-        # Brand-filtered page has products (no empty markers) but not our ID
+        # Brand-filtered page has products (no empty markers) but not our ID.
+        # The base shelf is well-stocked (>= the sparse-shelf minimum).
         mock_get.return_value.text = _ranked_next_data_html([
-            {"usItemId": "other", "isSponsoredFlag": False},
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "other-2", "isSponsoredFlag": False},
+            {"usItemId": "other-3", "isSponsoredFlag": False},
         ])
 
         result = fetch_shelf_sync(
@@ -318,7 +326,9 @@ class TestFetchShelfSync:
         base_page = MagicMock()
         base_page.raise_for_status.return_value = None
         base_page.text = _ranked_next_data_html([
-            {"usItemId": "other", "isSponsoredFlag": False},
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "other-2", "isSponsoredFlag": False},
+            {"usItemId": "other-3", "isSponsoredFlag": False},
         ])
         mock_get.side_effect = [filtered_page, base_page]
 
@@ -351,8 +361,11 @@ class TestFetchShelfSync:
         ])
         base_page = MagicMock()
         base_page.raise_for_status.return_value = None
+        # Well-stocked base shelf carrying our product only as a sponsored ad.
         base_page.text = _ranked_next_data_html([
             {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": True},
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "other-2", "isSponsoredFlag": False},
         ])
         mock_get.side_effect = [brand_page, base_page]
 
@@ -382,8 +395,11 @@ class TestFetchShelfSync:
         ])
         base = MagicMock()
         base.raise_for_status.return_value = None
+        # Well-stocked base shelf carrying our product organically.
         base.text = _ranked_next_data_html([
             {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "other-2", "isSponsoredFlag": False},
         ])
         # Only brand page 1 and the base shelf are fetched.
         mock_get.side_effect = [page1, base]
@@ -420,6 +436,187 @@ class TestFetchShelfSync:
         )
 
         assert result is None
+
+
+class TestSparseGeneralShelf:
+    """
+    A base/general shelf carrying fewer than MIN_GENERAL_SHELF_PRODUCT_COUNT
+    structured product cards is treated as low quality and skipped
+    (ShelfUnavailable), so it never reaches the report — exactly like an
+    unavailable shelf. The threshold is applied ONLY to the base/general view,
+    and ONLY to a concrete positive count: an unknown count (no trustworthy
+    grid) or a degraded/empty grid is left to the existing handling so a
+    bot-mitigated scrape is never misread as a genuinely thin shelf.
+    """
+
+    URL = "https://www.walmart.com/browse/clothing/dresses/1"
+    THRESHOLD = MIN_GENERAL_SHELF_PRODUCT_COUNT
+
+    @staticmethod
+    def _cards(n: int) -> list:
+        """n distinct non-target organic product cards."""
+        return [
+            {"usItemId": f"filler-{i}", "isSponsoredFlag": False}
+            for i in range(n)
+        ]
+
+    def _target(self, sponsored: bool = False) -> dict:
+        return {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": sponsored}
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_base_shelf_below_threshold_is_skipped_as_sparse(
+        self, mock_get, mock_settings
+    ) -> None:
+        # No brand → the fetched shelf IS the base/general view. It carries the
+        # product but only THRESHOLD-1 cards in total: too thin to report.
+        mock_settings.webscraping_api_key = ""
+        sparse = self._cards(self.THRESHOLD - 2) + [self._target()]
+        assert len(sparse) == self.THRESHOLD - 1
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = _ranked_next_data_html(sparse)
+
+        result = fetch_shelf_sync(self.URL, HTIGEA_PRODUCT_ID, "")
+
+        assert isinstance(result, ShelfUnavailable)
+        assert "sparse general shelf" in result.reason
+        assert f"only {self.THRESHOLD - 1} products" in result.reason
+        # FetchResult metadata is carried through the unavailable result.
+        assert result.fetch_path == "direct_fallback"
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_base_shelf_at_threshold_is_kept(
+        self, mock_get, mock_settings
+    ) -> None:
+        mock_settings.webscraping_api_key = ""
+        cards = self._cards(self.THRESHOLD - 1) + [self._target()]
+        assert len(cards) == self.THRESHOLD
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = _ranked_next_data_html(cards)
+
+        result = fetch_shelf_sync(self.URL, HTIGEA_PRODUCT_ID, "")
+
+        assert isinstance(result, dict)
+        assert result["visibility"] is True
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_base_shelf_above_threshold_is_kept(
+        self, mock_get, mock_settings
+    ) -> None:
+        mock_settings.webscraping_api_key = ""
+        cards = self._cards(self.THRESHOLD) + [self._target()]
+        assert len(cards) == self.THRESHOLD + 1
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = _ranked_next_data_html(cards)
+
+        result = fetch_shelf_sync(self.URL, HTIGEA_PRODUCT_ID, "")
+
+        assert isinstance(result, dict)
+        assert result["visibility"] is True
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_unknown_grid_count_with_raw_presence_is_not_skipped(
+        self, mock_get, mock_settings
+    ) -> None:
+        # No structured result grid at all (a client-hydrated page), so the count
+        # is UNKNOWN (None). The threshold must not apply — the product is present
+        # in the raw HTML and the shelf is kept and evaluated normally.
+        mock_settings.webscraping_api_key = ""
+        raw_html = f"<html><body>found {HTIGEA_PRODUCT_ID} on this shelf</body></html>"
+        assert _shelf_grid_item_count(raw_html) is None
+        mock_get.return_value.raise_for_status.return_value = None
+        mock_get.return_value.text = raw_html
+
+        result = fetch_shelf_sync(self.URL, HTIGEA_PRODUCT_ID, "")
+
+        assert isinstance(result, dict)
+        assert result["visibility"] is True
+
+    @patch("app.tools.shelf_checker.settings")
+    @patch("app.tools.shelf_checker.requests.get")
+    def test_thin_brand_filter_view_does_not_skip_a_stocked_base(
+        self, mock_get, mock_settings
+    ) -> None:
+        # The brand-filtered view legitimately returns a single item; the base
+        # view is well-stocked. The threshold is a BASE-view rule only, so the
+        # shelf is evaluated normally (discoverability measured, not skipped).
+        mock_settings.webscraping_api_key = ""
+        brand_page = MagicMock()
+        brand_page.raise_for_status.return_value = None
+        brand_page.text = _ranked_next_data_html([self._target()])  # one item only
+        base_page = MagicMock()
+        base_page.raise_for_status.return_value = None
+        base_page.text = _ranked_next_data_html(
+            self._cards(self.THRESHOLD) + [self._target()]
+        )
+        mock_get.side_effect = [brand_page, base_page]
+
+        result = fetch_shelf_sync(self.URL, HTIGEA_PRODUCT_ID, "Htigea")
+
+        assert isinstance(result, dict)
+        assert result["discoverability"] is True
+        assert result["visibility"] is True
+
+    def test_degraded_or_empty_base_grid_is_not_misclassified_as_sparse(
+        self,
+    ) -> None:
+        # (a) A known degraded API fetch: an empty result grid on the
+        # ``api_empty_grid`` path. It must be left to the existing handling,
+        # never relabeled as a sparse shelf.
+        degraded = FetchResult(_ranked_next_data_html([]), "api_empty_grid", 200)
+        with patch("app.tools.shelf_checker._fetch_html", return_value=degraded):
+            result = fetch_shelf_sync(self.URL, HTIGEA_PRODUCT_ID, "")
+        assert not (
+            isinstance(result, ShelfUnavailable) and "sparse" in result.reason
+        )
+        assert isinstance(result, dict)
+        assert result["visibility"] is False
+
+        # (b) An empty grid (count 0) on any path is treated as unknown, never as
+        # a genuinely thin "0 products" shelf — this protects client-hydrated
+        # tiles and bot-mitigated pages from being misread as sparse.
+        empty = FetchResult(_ranked_next_data_html([]), "direct_fallback", 200)
+        with patch("app.tools.shelf_checker._fetch_html", return_value=empty):
+            result = fetch_shelf_sync(self.URL, HTIGEA_PRODUCT_ID, "")
+        assert not (
+            isinstance(result, ShelfUnavailable) and "sparse" in result.reason
+        )
+        assert isinstance(result, dict)
+        assert result["visibility"] is False
+
+    async def test_sparse_shelf_does_not_consume_a_slot_or_count_toward_target(
+        self,
+    ) -> None:
+        # End-to-end: a sparse base shelf is skipped like any unavailable shelf —
+        # it never becomes a found/missing row, never consumes a Recommended
+        # Category Pages slot, and does not count toward the requested target.
+        from app.agents.orchestrator import _call_check_shelf
+        from app.models.session_state import BrowsePage, SessionState
+
+        state = SessionState(recommended_result_count=3)
+        state.product.title = "Test Product"
+        state.product.brand = ""
+        state.product.product_id = HTIGEA_PRODUCT_ID
+        url = "https://www.walmart.com/browse/food/snacks/sparse"
+        state.pages_discovered.append(
+            BrowsePage(url=url, keyword="kw", relevance_score=0.9)
+        )
+
+        sparse_html = _ranked_next_data_html(
+            self._cards(self.THRESHOLD - 2) + [self._target()]
+        )
+        with patch("app.tools.shelf_checker._fetch_html", return_value=sparse_html):
+            result = await _call_check_shelf(state, {"max_pages": 1})
+
+        assert result.success is True
+        assert result.data["unavailable"] == 1
+        assert state.eligible_result_count == 0
+        assert state.found_pages == []
+        assert state.missing_pages == []
+        assert state.to_final_report()["recommended_result_count_returned"] == 0
 
 
 class TestPresenceFallbackRegression:
@@ -501,8 +698,15 @@ class TestPresenceFallbackRegression:
         # digit-boundary check must not treat that as presence.
         mock_settings.webscraping_api_key = ""
         longer = f"{HTIGEA_PRODUCT_ID}0000"
+        # Well-stocked base shelf (>= the sparse-shelf minimum); none of the
+        # cards is the target id — one merely embeds it in a longer number.
         page = self._searchresult_plus_dom(
-            [{"usItemId": longer, "isSponsoredFlag": False}], f"ref {longer}"
+            [
+                {"usItemId": longer, "isSponsoredFlag": False},
+                {"usItemId": "filler-a", "isSponsoredFlag": False},
+                {"usItemId": "filler-b", "isSponsoredFlag": False},
+            ],
+            f"ref {longer}",
         )
         mock_get.return_value.raise_for_status.return_value = None
         mock_get.return_value.text = page
@@ -532,8 +736,11 @@ class TestPresenceFallbackRegression:
         ])
         base_page = MagicMock()
         base_page.raise_for_status.return_value = None
+        # Well-stocked base shelf carrying our product organically.
         base_page.text = _ranked_next_data_html([
             {"usItemId": HTIGEA_PRODUCT_ID, "isSponsoredFlag": False},
+            {"usItemId": "other-1", "isSponsoredFlag": False},
+            {"usItemId": "other-2", "isSponsoredFlag": False},
         ])
         mock_get.side_effect = [brand_page, base_page]
 
@@ -752,7 +959,9 @@ class TestNegativeEvidenceGuard:
     async def test_absent_from_loaded_shelf_has_unknown_discoverability_without_brand(self) -> None:
         url = "https://www.walmart.com/browse/beauty/shampoo/3"
         loaded_html = _ranked_next_data_html([
-            {"usItemId": "different-product", "isSponsoredFlag": False},
+            {"usItemId": "different-1", "isSponsoredFlag": False},
+            {"usItemId": "different-2", "isSponsoredFlag": False},
+            {"usItemId": "different-3", "isSponsoredFlag": False},
         ])
         with patch("app.tools.shelf_checker._fetch_html", return_value=loaded_html):
             stats = await check_shelf_visibility(
@@ -801,7 +1010,9 @@ class TestNegativeEvidenceGuard:
         loaded = MagicMock()
         loaded.status_code = 200
         loaded.text = _ranked_next_data_html([
-            {"usItemId": "different-product", "isSponsoredFlag": False},
+            {"usItemId": "different-1", "isSponsoredFlag": False},
+            {"usItemId": "different-2", "isSponsoredFlag": False},
+            {"usItemId": "different-3", "isSponsoredFlag": False},
         ])
         loaded.raise_for_status.return_value = None
         mock_get.side_effect = [failed, loaded]
